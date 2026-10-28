@@ -856,6 +856,15 @@ public class CallSiteVirtualEdgesTest {
 
   @Test
   public void unknownReceiverRespectsBothInterfaceBounds() {
+    assertUnknownReceiver(false);
+  }
+
+  @Test
+  public void unknownReceiverRetainsItsDemandCallbackTarget() {
+    assertUnknownReceiver(true);
+  }
+
+  private void assertUnknownReceiver(boolean demand) {
     SootClass required = new SootClass("example.RequiredCallback", Modifier.PUBLIC | Modifier.INTERFACE | Modifier.ABSTRACT);
     Scene.v().addClass(required);
     required.setLibraryClass();
@@ -864,7 +873,8 @@ public class CallSiteVirtualEdgesTest {
     required.addMethod(declaration);
     SootMethod selected = callbackMethod("example.BothContractsTask");
     selected.getDeclaringClass().addInterface(required);
-    instanceBody(selected, true).getUnits().add(Jimple.v().newReturnVoidStmt());
+    Body selectedBody = instanceBody(selected, true);
+    selectedBody.getUnits().add(Jimple.v().newReturnVoidStmt());
     SootMethod unrelated = callbackMethod("example.SourceContractOnlyTask");
     instanceBody(unrelated, true).getUnits().add(Jimple.v().newReturnVoidStmt());
     SootClass requiredOnly = newClass("example.RequiredContractOnlyTask", true);
@@ -886,11 +896,39 @@ public class CallSiteVirtualEdgesTest {
     body.getUnits().add(Jimple.v().newReturnVoidStmt());
     beforePropagation = pag -> pag.addAllocEdge(pag.makeAllocNode("unknown-callback",
         AnySubType.v(callback.getType()), body.getMethod()), pag.findLocalVarNode(wide));
-    runWithCustomBuilder(body.getMethod(), method -> { });
+    runWithCustomBuilder(body.getMethod(), method -> { }, demand);
     assertTrue(hasTarget(Scene.v().getCallGraph(), site, selected));
     assertFalse(hasTarget(Scene.v().getCallGraph(), site, unrelated));
     assertFalse("The summary must retain the original unknown object's bound as well",
         hasTarget(Scene.v().getCallGraph(), site, other));
+    if (demand) {
+      assertFalse("A compatible unknown receiver must retain the callback during refinement",
+          Scene.v().getPointsToAnalysis().reachingObjects(selectedBody.getThisLocal()).isEmpty());
+    }
+  }
+
+  @Test
+  public void unknownAbstractReceiverKeepsItsConcreteInheritedBehavior() {
+    SootMethod target = callbackMethod("example.AbstractReceiverTask");
+    target.getDeclaringClass().setModifiers(Modifier.PUBLIC | Modifier.ABSTRACT);
+    instanceBody(target, true).getUnits().add(Jimple.v().newReturnVoidStmt());
+    Body body = entryBody("example.UnknownAbstractApplication");
+    Local receiver = Jimple.v().newLocal("unknown", target.getDeclaringClass().getType());
+    body.getLocals().add(receiver);
+    body.getUnits().add(Jimple.v().newAssignStmt(receiver, NullConstant.v()));
+    SootMethod api = new SootMethod("scheduleAbstract", Collections.singletonList(receiver.getType()),
+        VoidType.v(), Modifier.PUBLIC | Modifier.STATIC | Modifier.NATIVE);
+    dispatcher.addMethod(api);
+    Stmt site = Jimple.v().newInvokeStmt(Jimple.v().newStaticInvokeExpr(api.makeRef(), receiver));
+    site.addTag(new VirtualEdgeSummaryTag(new VirtualEdge(Kind.GENERIC_FAKE, null,
+        new DirectTarget(target.getDeclaringClass().getType(), new MethodSubSignature(target.makeRef()), 0))));
+    body.getUnits().add(site);
+    body.getUnits().add(Jimple.v().newReturnVoidStmt());
+    beforePropagation = pag -> pag.addAllocEdge(pag.makeAllocNode("unknown-abstract-callback",
+        AnySubType.v(target.getDeclaringClass().getType()), body.getMethod()), pag.findLocalVarNode(receiver));
+    runWithCustomBuilder(body.getMethod(), method -> { });
+    assertTrue("An unknown concrete extension can inherit this implementation",
+        hasTarget(Scene.v().getCallGraph(), site, target));
   }
 
   @Test(expected = IllegalArgumentException.class)

@@ -22,7 +22,6 @@ package soot.jimple.toolkits.callgraph;
  * #L%
  */
 
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.BitSet;
 import java.util.Collection;
@@ -673,8 +672,8 @@ public class OnFlyCallGraphBuilder {
             if (localTarget == null) {
               virtualCalls.resolve(type, receiverType, ref, site.getContainer(), targetsQueue, appOnly);
             } else {
-              resolveLocalSummaryType(virtualCalls, fh, type, receiver.getType(), localTarget.getTargetType(), ref,
-                  site.getContainer());
+              virtualCalls.resolve(type, receiver.getType(), localTarget.getTargetType(), ref, site.getContainer(),
+                  targetsQueue, appOnly);
             }
             if (!targets.hasNext() && options.resolve_all_abstract_invokes()) {
               /*
@@ -705,39 +704,6 @@ public class OnFlyCallGraphBuilder {
     }
     if (baseToInvokeSite.get(receiver) != null) {
       addBaseType(receiver, srcContext, type);
-    }
-  }
-
-  private void resolveLocalSummaryType(VirtualCalls calls, FastHierarchy hierarchy, Type actualType, Type declaredType,
-      RefType requiredType, SootMethodRef method, SootMethod container) {
-    if (!(actualType instanceof AnySubType) || requiredType == null) {
-      calls.resolve(actualType, declaredType, requiredType, method, container, targetsQueue, appOnly);
-      return;
-    }
-    // AnySubType denotes a set of receiver classes. Intersect both bounds before
-    // dispatch; filtering resolved method owners would discard valid inherited methods.
-    RefType base = ((AnySubType) actualType).getBase();
-    ArrayDeque<SootClass> pending = new ArrayDeque<>();
-    pending.add(hierarchy.canStoreType(requiredType, base) ? requiredType.getSootClass() : base.getSootClass());
-    Set<SootClass> visited = new HashSet<>();
-    Set<SootMethod> resolved = new HashSet<>();
-    while (!pending.isEmpty()) {
-      SootClass candidate = pending.remove();
-      if (!visited.add(candidate)) {
-        continue;
-      }
-      if (candidate.isInterface()) {
-        pending.addAll(hierarchy.getAllImplementersOfInterface(candidate));
-      } else {
-        pending.addAll(hierarchy.getSubclassesOf(candidate));
-        if (candidate.isConcrete() && hierarchy.canStoreType(candidate.getType(), declaredType)
-            && hierarchy.canStoreType(candidate.getType(), requiredType)) {
-          SootMethod target = calls.resolveNonSpecial(candidate.getType(), method, appOnly);
-          if (target != null && resolved.add(target)) {
-            targetsQueue.add(target);
-          }
-        }
-      }
     }
   }
 
