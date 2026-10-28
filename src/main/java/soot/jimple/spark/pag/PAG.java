@@ -1109,7 +1109,7 @@ public class PAG implements PointsToAnalysis {
       InvokeExpr ie = e.srcStmt().getInvokeExpr();
       VirtualEdge ve = summaries.getVirtualEdgesMatchingCallSite(e.srcStmt());
       boolean isExpectedType = false;
-      if (e.srcStmt().hasTag(ExpectedTypeTag.NAME)) {
+      if (!e.srcStmt().hasTag(VirtualEdgeSummaryTag.NAME) && e.srcStmt().hasTag(ExpectedTypeTag.NAME)) {
         ExpectedTypeTag tag = (ExpectedTypeTag) e.srcStmt().getTag(ExpectedTypeTag.NAME);
         ve = new VirtualEdge(Kind.GENERIC_FAKE, null, new DeferredVirtualEdgeTarget(tag.getExpectedType()));
         isExpectedType = true;

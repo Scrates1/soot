@@ -93,6 +93,14 @@ public class PhaseOptions {
   }
 
   /**
+   * Removes explicit options associated with a phase, for example after removing a temporary transform.
+   * The phase's declared default options remain in effect. Other phases are not modified.
+   */
+  public void clearPhaseOptions(HasPhaseOptions phase) {
+    phaseToOptionMap.remove(phase);
+  }
+
+  /**
    * This method returns true iff key "name" is in options and maps to "true".
    */
   public static boolean getBoolean(Map<String, String> options, String name) {
