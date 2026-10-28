@@ -74,6 +74,8 @@ import soot.jimple.spark.sets.PointsToSetEqualsWrapper;
 import soot.jimple.spark.sets.PointsToSetInternal;
 import soot.jimple.toolkits.callgraph.VirtualCalls;
 import soot.toolkits.scalar.Pair;
+import soot.util.queue.ChunkedQueue;
+import soot.util.queue.QueueReader;
 
 /**
  * Tries to find imprecision in points-to sets from a previously run analysis. Requires that all sub-results of previous
@@ -1147,14 +1149,17 @@ public final class DemandCSPointsTo implements PointsToAnalysis {
       return Collections.<SootMethod>emptySet();
     }
     if (type instanceof AnySubType) {
-      AnySubType any = (AnySubType) type;
-      RefType refType = any.getBase();
-      if (pag.getTypeManager().getFastHierarchy().canStoreType(receiverType, refType)
-          || pag.getTypeManager().getFastHierarchy().canStoreType(refType, receiverType)) {
-        return possibleTargets;
-      } else {
-        return Collections.<SootMethod>emptySet();
+      ChunkedQueue<SootMethod> targets = new ChunkedQueue<>();
+      QueueReader<SootMethod> reader = targets.reader();
+      VirtualCalls.v().resolve(type, receiverType, receiverType, callee.makeRef(), null, targets, false);
+      Set<SootMethod> result = new HashSet<>();
+      while (reader.hasNext()) {
+        SootMethod target = reader.next();
+        if (possibleTargets.contains(target)) {
+          result.add(target);
+        }
       }
+      return result;
     }
     if (type instanceof ArrayType) {
       // we'll invoke the java.lang.Object method in this

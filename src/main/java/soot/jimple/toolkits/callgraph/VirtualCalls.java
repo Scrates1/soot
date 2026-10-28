@@ -22,6 +22,7 @@ package soot.jimple.toolkits.callgraph;
  * #L%
  */
 
+import java.util.ArrayDeque;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -158,7 +159,9 @@ public class VirtualCalls {
        *
        * Since Java has no multiple inheritance call by signature resolution is only activated if the base is an interface.
        */
-      if (options.library() == CGOptions.library_signature_resolution && base.getSootClass().isInterface()) {
+      if (sigType instanceof RefType) {
+        resolveBoundedAnySubType(base, declaredType, (RefType) sigType, callee, targets, appOnly);
+      } else if (options.library() == CGOptions.library_signature_resolution && base.getSootClass().isInterface()) {
         LOGGER.warn("Deprecated library dispatch is conducted. The results might be unsound...");
         resolveLibrarySignature(declaredType, sigType, callee, container, targets, appOnly, base);
       } else {
@@ -172,6 +175,36 @@ public class VirtualCalls {
       return;
     } else {
       throw new RuntimeException("oops " + t);
+    }
+  }
+
+  private void resolveBoundedAnySubType(RefType base, Type declaredType, RefType requiredType, SootMethodRef method,
+      ChunkedQueue<SootMethod> targets, boolean appOnly) {
+    // Intersect receiver bounds before dispatch; method owners alone do not
+    // identify the receiver class when an implementation is inherited.
+    FastHierarchy hierarchy = Scene.v().getOrMakeFastHierarchy();
+    ArrayDeque<SootClass> pending = new ArrayDeque<>();
+    pending.add(hierarchy.canStoreType(requiredType, base) ? requiredType.getSootClass() : base.getSootClass());
+    Set<SootClass> visited = new HashSet<>();
+    Set<SootMethod> resolved = new HashSet<>();
+    while (!pending.isEmpty()) {
+      SootClass candidate = pending.remove();
+      if (!visited.add(candidate)) {
+        continue;
+      }
+      if (candidate.isInterface()) {
+        pending.addAll(hierarchy.getAllImplementersOfInterface(candidate));
+      } else {
+        pending.addAll(hierarchy.getSubclassesOf(candidate));
+        // An unknown concrete extension may inherit a concrete method from an abstract class.
+        if ((declaredType == null || hierarchy.canStoreType(candidate.getType(), declaredType))
+            && hierarchy.canStoreType(candidate.getType(), requiredType)) {
+          SootMethod target = resolveNonSpecial(candidate.getType(), method, appOnly);
+          if (target != null && resolved.add(target)) {
+            targets.add(target);
+          }
+        }
+      }
     }
   }
 
