@@ -1093,6 +1093,18 @@ public class PAG implements PointsToAnalysis {
     return assign2edges.get(val);
   }
 
+  private Node constrainCallSiteReceiver(Edge edge, MethodPAG source, Node receiver, RefType requiredType) {
+    if (requiredType == null || Scene.v().getOrMakeFastHierarchy().canStoreType(receiver.getType(), requiredType)) {
+      return receiver;
+    }
+    // As for a cast node, restrict the receiver before passing it into an inherited
+    // method whose this type may be wider than the summary's declared target type.
+    Node constrained = makeLocalVarNode(new Pair<>(edge.srcStmt(), "call-site-summary-receiver"), requiredType, edge.src());
+    constrained = source.parameterize(constrained, edge.srcCtxt()).getReplacement();
+    addEdge(receiver, constrained);
+    return constrained;
+  }
+
   public void addCallTarget(Edge e) {
     if (!e.passesParameters()) {
       return;
@@ -1133,6 +1145,9 @@ public class PAG implements PointsToAnalysis {
               Node parm = srcmpag.nodeFactory().getNode(local);
               parm = srcmpag.parameterize(parm, e.srcCtxt());
               parm = parm.getReplacement();
+              if (matchedSummary) {
+                parm = constrainCallSiteReceiver(e, srcmpag, parm, ieEdgeTgt.getTargetType());
+              }
 
               // Get the PAG node for the "this" local in the callback
               Node thiz = tgtmpag.nodeFactory().caseThis();

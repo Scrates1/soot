@@ -40,6 +40,7 @@ import org.junit.Test;
 
 import soot.Body;
 import soot.ArrayType;
+import soot.AnySubType;
 import soot.G;
 import soot.Kind;
 import soot.Local;
@@ -78,6 +79,7 @@ import soot.tagkit.ExpectedTypeTag;
 /** Tests local summary selection and the resulting call graph/points-to fixed point. */
 public class CallSiteVirtualEdgesTest {
   private static PAG capturedPAG;
+  private static Consumer<PAG> beforePropagation;
   private static VirtualEdgesSummaries defaultSummaries;
   private SootClass dispatcher;
   private SootClass callback;
@@ -89,6 +91,7 @@ public class CallSiteVirtualEdgesTest {
   public void setUp() {
     G.reset();
     defaultSummaries = null;
+    beforePropagation = pag -> { };
     Options.v().set_allow_phantom_refs(true);
     Options.v().set_prepend_classpath(true);
     Scene.v().loadBasicClasses();
@@ -371,6 +374,11 @@ public class CallSiteVirtualEdgesTest {
   }
 
   @Test
+  public void expectedReturnMetadataPreservesDemandParameterMappings() {
+    assertDemandPropagation(InvocationKind.STATIC, "expectedReturn");
+  }
+
+  @Test
   public void demandStaticCovariantKeepsCallbackContext() {
     assertDemandPropagation(InvocationKind.STATIC, "covariant");
   }
@@ -484,6 +492,9 @@ public class CallSiteVirtualEdgesTest {
       dispatcher.addInterface(apiType);
     }
     SootClass app = newClass("example.DemandApplication", true);
+    if (shape.equals("expectedReturn")) {
+      api.setReturnType(Scene.v().getObjectType());
+    }
     if (kind == InvocationKind.SPECIAL) {
       app.setSuperclass(dispatcher);
     }
@@ -531,6 +542,18 @@ public class CallSiteVirtualEdgesTest {
     }
     Stmt firstCall = invocation(kind, base, api, dispatchTask, firstValue);
     Stmt secondCall = invocation(kind, base, api, second, secondValue);
+    if (shape.equals("expectedReturn")) {
+      Local firstResult = Jimple.v().newLocal("firstApiResult", Scene.v().getObjectType());
+      Local secondResult = Jimple.v().newLocal("secondApiResult", Scene.v().getObjectType());
+      body.getLocals().add(firstResult);
+      body.getLocals().add(secondResult);
+      firstCall = Jimple.v().newAssignStmt(firstResult, firstCall.getInvokeExpr());
+      secondCall = Jimple.v().newAssignStmt(secondResult, secondCall.getInvokeExpr());
+      firstCall.addTag(new ExpectedTypeTag(payload.getType()));
+      secondCall.addTag(new ExpectedTypeTag(payload.getType()));
+    }
+    final Stmt firstSite = firstCall;
+    final Stmt secondSite = secondCall;
     body.getUnits().add(firstCall);
     body.getUnits().add(secondCall);
     Local result = Jimple.v().newLocal("result", payload.getType());
@@ -542,8 +565,8 @@ public class CallSiteVirtualEdgesTest {
     VirtualEdge local = new VirtualEdge(Kind.GENERIC_FAKE, null, direct);
     runWithCustomBuilder(entry, method -> {
       if (method == entry) {
-        firstCall.addTag(new VirtualEdgeSummaryTag(local));
-        secondCall.addTag(new VirtualEdgeSummaryTag(local));
+        firstSite.addTag(new VirtualEdgeSummaryTag(local));
+        secondSite.addTag(new VirtualEdgeSummaryTag(local));
       }
     }, true);
     ContextSensitiveInfo info = new ContextSensitiveInfo(capturedPAG);
@@ -750,6 +773,126 @@ public class CallSiteVirtualEdgesTest {
     return body;
   }
 
+  @Test
+  public void nullReceiverKeepsTheApiWithoutCreatingAModelCall() {
+    Body body = entryBody("example.NullCallbackApplication");
+    SootMethod api = new SootMethod("scheduleNull", Collections.singletonList(callback.getType()),
+        VoidType.v(), Modifier.PUBLIC | Modifier.STATIC | Modifier.NATIVE);
+    dispatcher.addMethod(api);
+    SootMethod target = callbackMethod("example.NullTask");
+    instanceBody(target, true).getUnits().add(Jimple.v().newReturnVoidStmt());
+    Stmt site = Jimple.v().newInvokeStmt(Jimple.v().newStaticInvokeExpr(api.makeRef(), NullConstant.v()));
+    site.addTag(new VirtualEdgeSummaryTag(new VirtualEdge(Kind.GENERIC_FAKE, null,
+        new DirectTarget(callback.getType(), new MethodSubSignature(target.makeRef()), 0))));
+    body.getUnits().add(site);
+    body.getUnits().add(Jimple.v().newReturnVoidStmt());
+    runWithCustomBuilder(body.getMethod(), method -> { }, true);
+    assertTrue(hasTarget(Scene.v().getCallGraph(), site, api));
+    assertFalse(hasTarget(Scene.v().getCallGraph(), site, target));
+    assertTrue(capturedPAG.getCallSiteModelCalls().isEmpty());
+  }
+
+  @Test
+  public void inheritedCallbackFiltersSiblingReceiversInPag() {
+    assertInheritedReceiver(false);
+  }
+
+  @Test
+  public void inheritedCallbackFiltersSiblingReceiversInDemandAnalysis() {
+    assertInheritedReceiver(true);
+  }
+
+  @Test
+  public void demandRefinementPreservesThePagUpperBoundAcrossACast() {
+    SootClass selected = newClass("example.CastSelected", true);
+    SootClass sibling = newClass("example.CastSibling", true);
+    Body body = entryBody("example.CastApplication");
+    Local first = allocate(body, "selected", selected);
+    Local other = allocate(body, "sibling", sibling);
+    Local wide = Jimple.v().newLocal("wide", Scene.v().getObjectType());
+    Local narrowed = Jimple.v().newLocal("narrowed", selected.getType());
+    body.getLocals().add(wide);
+    body.getLocals().add(narrowed);
+    body.getUnits().add(Jimple.v().newAssignStmt(wide, first));
+    body.getUnits().add(Jimple.v().newAssignStmt(wide, other));
+    body.getUnits().add(Jimple.v().newAssignStmt(narrowed, Jimple.v().newCastExpr(wide, selected.getType())));
+    body.getUnits().add(Jimple.v().newReturnVoidStmt());
+    runWithCustomBuilder(body.getMethod(), method -> { }, true);
+    assertEquals(Collections.singleton(selected.getType()), capturedPAG.reachingObjects(narrowed).possibleTypes());
+    assertEquals("Refinement must remain within the solved PAG upper bound",
+        Collections.singleton(selected.getType()), Scene.v().getPointsToAnalysis().reachingObjects(narrowed).possibleTypes());
+  }
+
+  private void assertInheritedReceiver(boolean demand) {
+    SootMethod target = callbackMethod("example.ParentTask");
+    Body targetBody = instanceBody(target, true);
+    targetBody.getUnits().add(Jimple.v().newReturnVoidStmt());
+    SootClass selected = newClass("example.SelectedChild", true);
+    selected.setSuperclass(target.getDeclaringClass());
+    SootClass sibling = newClass("example.SiblingChild", true);
+    sibling.setSuperclass(target.getDeclaringClass());
+    Body body = entryBody("example.InheritedCallbackApplication");
+    Local wide = Jimple.v().newLocal("wide", Scene.v().getObjectType());
+    body.getLocals().add(wide);
+    Local first = allocate(body, "selected", selected);
+    Local other = allocate(body, "sibling", sibling);
+    body.getUnits().add(Jimple.v().newAssignStmt(wide, first));
+    body.getUnits().add(Jimple.v().newAssignStmt(wide, other));
+    SootMethod api = new SootMethod("scheduleInherited", Collections.singletonList(Scene.v().getObjectType()),
+        VoidType.v(), Modifier.PUBLIC | Modifier.STATIC | Modifier.NATIVE);
+    dispatcher.addMethod(api);
+    Stmt site = Jimple.v().newInvokeStmt(Jimple.v().newStaticInvokeExpr(api.makeRef(), wide));
+    site.addTag(new VirtualEdgeSummaryTag(new VirtualEdge(Kind.GENERIC_FAKE, null,
+        new DirectTarget(selected.getType(), new MethodSubSignature(target.makeRef()), 0))));
+    body.getUnits().add(site);
+    body.getUnits().add(Jimple.v().newReturnVoidStmt());
+    runWithCustomBuilder(body.getMethod(), method -> { }, demand);
+    assertTrue(hasTarget(Scene.v().getCallGraph(), site, target));
+    PointsToSet receivers = Scene.v().getPointsToAnalysis().reachingObjects(targetBody.getThisLocal());
+    assertTrue(receivers.hasNonEmptyIntersection(Scene.v().getPointsToAnalysis().reachingObjects(first)));
+    assertFalse("An inherited method must not receive a sibling excluded by the summary",
+        receivers.hasNonEmptyIntersection(Scene.v().getPointsToAnalysis().reachingObjects(other)));
+  }
+
+  @Test
+  public void unknownReceiverRespectsBothInterfaceBounds() {
+    SootClass required = new SootClass("example.RequiredCallback", Modifier.PUBLIC | Modifier.INTERFACE | Modifier.ABSTRACT);
+    Scene.v().addClass(required);
+    required.setLibraryClass();
+    SootMethod declaration = new SootMethod("accept", Collections.singletonList(payload.getType()),
+        VoidType.v(), Modifier.PUBLIC | Modifier.ABSTRACT);
+    required.addMethod(declaration);
+    SootMethod selected = callbackMethod("example.BothContractsTask");
+    selected.getDeclaringClass().addInterface(required);
+    instanceBody(selected, true).getUnits().add(Jimple.v().newReturnVoidStmt());
+    SootMethod unrelated = callbackMethod("example.SourceContractOnlyTask");
+    instanceBody(unrelated, true).getUnits().add(Jimple.v().newReturnVoidStmt());
+    SootClass requiredOnly = newClass("example.RequiredContractOnlyTask", true);
+    requiredOnly.addInterface(required);
+    SootMethod other = new SootMethod("accept", declaration.getParameterTypes(), VoidType.v(), Modifier.PUBLIC);
+    requiredOnly.addMethod(other);
+    instanceBody(other, true).getUnits().add(Jimple.v().newReturnVoidStmt());
+    Body body = entryBody("example.UnknownCallbackApplication");
+    Local wide = Jimple.v().newLocal("unknown", callback.getType());
+    body.getLocals().add(wide);
+    body.getUnits().add(Jimple.v().newAssignStmt(wide, NullConstant.v()));
+    SootMethod api = new SootMethod("scheduleUnknown", Collections.singletonList(callback.getType()),
+        VoidType.v(), Modifier.PUBLIC | Modifier.STATIC | Modifier.NATIVE);
+    dispatcher.addMethod(api);
+    Stmt site = Jimple.v().newInvokeStmt(Jimple.v().newStaticInvokeExpr(api.makeRef(), wide));
+    site.addTag(new VirtualEdgeSummaryTag(new VirtualEdge(Kind.GENERIC_FAKE, null,
+        new DirectTarget(required.getType(), new MethodSubSignature(declaration.makeRef()), 0))));
+    body.getUnits().add(site);
+    body.getUnits().add(Jimple.v().newReturnVoidStmt());
+    beforePropagation = pag -> pag.addAllocEdge(pag.makeAllocNode("unknown-callback",
+        AnySubType.v(callback.getType()), body.getMethod()), pag.findLocalVarNode(wide));
+    runWithCustomBuilder(body.getMethod(), method -> { });
+    assertTrue(hasTarget(Scene.v().getCallGraph(), site, selected));
+    assertFalse(hasTarget(Scene.v().getCallGraph(), site, unrelated));
+    assertFalse("The summary must retain the original unknown object's bound as well",
+        hasTarget(Scene.v().getCallGraph(), site, other));
+  }
+
   @Test(expected = IllegalArgumentException.class)
   public void nonDirectMappingsAreRejectedBeforeTheyCanBeSilentlyIgnored() {
     VirtualEdge local = summary(call);
@@ -876,6 +1019,7 @@ public class CallSiteVirtualEdgesTest {
     @Override
     protected void propagatePAG(soot.options.SparkOptions opts, PAG pag) {
       capturedPAG = pag;
+      beforePropagation.accept(pag);
       super.propagatePAG(opts, pag);
     }
 
