@@ -23,6 +23,9 @@ package soot.jimple.toolkits.callgraph;
  */
 
 import soot.Kind;
+import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.AbstractParameterMapping;
+import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.DirectParameterMapping;
+import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.DirectTarget;
 import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.VirtualEdge;
 import soot.tagkit.Tag;
 
@@ -34,6 +37,9 @@ import soot.tagkit.Tag;
  * Non-null summaries require {@link Kind#GENERIC_FAKE}, one direct target, and
  * direct parameter mappings. Source matching metadata is optional because the tag
  * already identifies the invocation.
+ * Callback receivers must be locals; a null constant has no executable target.
+ * Other constant receivers are rejected during call graph construction. This does
+ * not restrict reference constants used by direct parameter mappings.
  * Complete the summary before attaching this tag. Do not mutate its targets or
  * parameter mappings while call graph or points-to construction is using it.
  */
@@ -48,8 +54,16 @@ public final class VirtualEdgeSummaryTag implements Tag {
     // Edge does not retain which summary target produced it. Restrict the new
     // call-site API so mappings from two same-signature targets cannot mix.
     if (summary != null && (summary.getTargets().size() != 1
-        || !(summary.getTargets().iterator().next() instanceof VirtualEdgesSummaries.DirectTarget))) {
+        || !(summary.getTargets().iterator().next() instanceof DirectTarget))) {
       throw new IllegalArgumentException("Call-site summaries require one direct target");
+    }
+    if (summary != null) {
+      DirectTarget target = (DirectTarget) summary.getTargets().iterator().next();
+      for (AbstractParameterMapping mapping : target.getParameterMappings()) {
+        if (!(mapping instanceof DirectParameterMapping)) {
+          throw new IllegalArgumentException("Call-site summaries require direct parameter mappings");
+        }
+      }
     }
     this.summary = summary;
   }

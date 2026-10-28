@@ -648,6 +648,14 @@ public class OnFlyCallGraphBuilder {
         } else {
           SootMethodRef ref = null;
           Type receiverType = receiver.getType();
+          DirectTarget localTarget = site.kind() == Kind.GENERIC_FAKE ? getLocalSummaryTarget(site.getStmt()) : null;
+          if (localTarget != null) {
+            if (localTarget.getTargetType() != null) {
+              receiverType = localTarget.getTargetType();
+            } else if (receiverType instanceof ArrayType) {
+              receiverType = sc.getObjectType();
+            }
+          }
 
           // Fake edges map to a different method signature, e.g., from execute(a) to a.run()
           if (receiverType instanceof RefType) {
@@ -661,7 +669,7 @@ public class OnFlyCallGraphBuilder {
           }
 
           if (ref != null) {
-            virtualCalls.resolve(type, receiver.getType(), ref, site.getContainer(), targetsQueue, appOnly);
+            virtualCalls.resolve(type, receiverType, ref, site.getContainer(), targetsQueue, appOnly);
             if (!targets.hasNext() && options.resolve_all_abstract_invokes()) {
               /*
                * In the situation where we find nothing to resolve an invoke to in the first call, this might be because the
@@ -677,7 +685,8 @@ public class OnFlyCallGraphBuilder {
                * Where as, it used to not resolve any targets in this situation, I want to at least resolve the method in the
                * parent class if there is one (as this is technically a possibility and the only information we have).
                */
-              virtualCalls.resolveSuperType(type, receiver.getType(), iie.getMethodRef(), targetsQueue, appOnly);
+              SootMethodRef superRef = localTarget == null ? iie.getMethodRef() : ref;
+              virtualCalls.resolveSuperType(type, receiverType, superRef, targetsQueue, appOnly);
             }
           }
         }
@@ -866,6 +875,13 @@ public class OnFlyCallGraphBuilder {
       }
       if (s.containsInvokeExpr()) {
         InvokeExpr ie = s.getInvokeExpr();
+        DirectTarget localTarget = getLocalSummaryTarget(s);
+        if (localTarget != null) {
+          Value value = localTarget.isBase() ? ((InstanceInvokeExpr) ie).getBase() : ie.getArg(localTarget.getArgIndex());
+          if (!(value instanceof Local) && !(value instanceof NullConstant)) {
+            throw new IllegalArgumentException("Call-site summary receivers require a Local or null constant");
+          }
+        }
         if (ie instanceof InstanceInvokeExpr) {
           InstanceInvokeExpr iie = (InstanceInvokeExpr) ie;
 
@@ -923,6 +939,12 @@ public class OnFlyCallGraphBuilder {
         }
       }
     }
+  }
+
+  private static DirectTarget getLocalSummaryTarget(Stmt statement) {
+    VirtualEdgeSummaryTag tag = (VirtualEdgeSummaryTag) statement.getTag(VirtualEdgeSummaryTag.NAME);
+    VirtualEdge summary = tag == null ? null : tag.getSummary();
+    return summary == null ? null : (DirectTarget) summary.getTargets().iterator().next();
   }
 
   protected void processVirtualEdgeSummary(SootMethod m, final Stmt s, Local receiver, InvocationVirtualEdgeTarget target,
