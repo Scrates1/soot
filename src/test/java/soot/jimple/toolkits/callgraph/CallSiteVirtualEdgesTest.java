@@ -39,6 +39,7 @@ import org.junit.Before;
 import org.junit.Test;
 
 import soot.Body;
+import soot.ArrayType;
 import soot.G;
 import soot.Kind;
 import soot.Local;
@@ -48,14 +49,19 @@ import soot.PackManager;
 import soot.PhaseOptions;
 import soot.RefType;
 import soot.Scene;
+import soot.SootField;
+import soot.PointsToSet;
 import soot.SootClass;
 import soot.SootMethod;
 import soot.Transform;
 import soot.VoidType;
 import soot.jimple.Jimple;
+import soot.jimple.IntConstant;
 import soot.jimple.NullConstant;
 import soot.jimple.Stmt;
 import soot.jimple.spark.SparkTransformer;
+import soot.jimple.spark.ondemand.DemandCSPointsTo;
+import soot.jimple.spark.ondemand.pautil.ContextSensitiveInfo;
 import soot.jimple.spark.builder.ContextInsensitiveBuilder;
 import soot.jimple.spark.pag.PAG;
 import soot.jimple.spark.solver.OnFlyCallGraph;
@@ -69,6 +75,8 @@ import soot.options.Options;
 
 /** Tests local summary selection and the resulting call graph/points-to fixed point. */
 public class CallSiteVirtualEdgesTest {
+  private static PAG capturedPAG;
+  private static VirtualEdgesSummaries defaultSummaries;
   private SootClass dispatcher;
   private SootClass callback;
   private SootClass payload;
@@ -78,6 +86,7 @@ public class CallSiteVirtualEdgesTest {
   @Before
   public void setUp() {
     G.reset();
+    defaultSummaries = null;
     Options.v().set_allow_phantom_refs(true);
     Options.v().set_prepend_classpath(true);
     Scene.v().loadBasicClasses();
@@ -154,7 +163,7 @@ public class CallSiteVirtualEdgesTest {
   }
 
   private enum InvocationKind {
-    VIRTUAL, STATIC, SPECIAL
+    VIRTUAL, STATIC, INTERFACE, SPECIAL
   }
 
   private void assertLocalSummaryPropagation(InvocationKind kind, boolean omitSource) {
@@ -255,6 +264,20 @@ public class CallSiteVirtualEdgesTest {
 
   @Test
   public void argumentMappingsAndNewObjectsPropagateThroughNestedCallbacks() {
+    assertNestedCallbacks(false, false);
+  }
+
+  @Test
+  public void coldCallbackBodyUsesTheSameFirstReachablePreparation() {
+    assertNestedCallbacks(true, false);
+  }
+
+  @Test
+  public void callbackBodyGeneratedDuringConstructionUsesTheSamePreparation() {
+    assertNestedCallbacks(false, true);
+  }
+
+  private void assertNestedCallbacks(boolean cold, boolean generated) {
     SootMethod touch = new SootMethod("touch", Collections.emptyList(), VoidType.v(), Modifier.PUBLIC);
     payload.addMethod(touch);
     Body touchBody = instanceBody(touch, false);
@@ -274,6 +297,15 @@ public class CallSiteVirtualEdgesTest {
         nestedTask, outerBody.getParameterLocal(0)));
     outerBody.getUnits().add(nestedCall);
     outerBody.getUnits().add(Jimple.v().newReturnVoidStmt());
+    if (cold) {
+      outer.setSource((method, phase) -> outerBody);
+      outer.releaseActiveBody();
+      assertFalse(outer.hasActiveBody());
+    }
+    if (generated) {
+      nested.releaseActiveBody();
+      assertFalse(nested.hasActiveBody());
+    }
 
     SootMethod ignored = callbackMethod("example.IgnoredTask");
     Body ignoredBody = instanceBody(ignored, true);
@@ -304,6 +336,9 @@ public class CallSiteVirtualEdgesTest {
       if (method == entry) {
         selectedCall.addTag(new VirtualEdgeSummaryTag(summary(selectedCall)));
       } else if (method == outer) {
+        if (generated) {
+          nested.setActiveBody(nestedBody);
+        }
         nestedCall.addTag(new VirtualEdgeSummaryTag(summary(nestedCall)));
       }
     };
@@ -328,12 +363,323 @@ public class CallSiteVirtualEdgesTest {
     assertSame(SparkTransformer.v(), PackManager.v().getPack("cg").get("cg.spark").getTransformer());
   }
 
+  @Test
+  public void demandStaticSingleKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.STATIC, "single");
+  }
+
+  @Test
+  public void demandStaticCovariantKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.STATIC, "covariant");
+  }
+
+  @Test
+  public void demandStaticCallbackPolyKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.STATIC, "callbackPoly");
+  }
+
+  @Test
+  public void demandStaticCallbackPolyCovariantKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.STATIC, "callbackPolyCovariant");
+  }
+
+  @Test
+  public void demandVirtualSingleKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.VIRTUAL, "single");
+  }
+
+  @Test
+  public void demandVirtualCovariantKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.VIRTUAL, "covariant");
+  }
+
+  @Test
+  public void demandVirtualCallbackPolyKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.VIRTUAL, "callbackPoly");
+  }
+
+  @Test
+  public void demandVirtualCallbackPolyCovariantKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.VIRTUAL, "callbackPolyCovariant");
+  }
+
+  @Test
+  public void demandInterfaceSingleKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.INTERFACE, "single");
+  }
+
+  @Test
+  public void demandInterfaceCovariantKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.INTERFACE, "covariant");
+  }
+
+  @Test
+  public void demandInterfaceCallbackPolyKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.INTERFACE, "callbackPoly");
+  }
+
+  @Test
+  public void demandInterfaceCallbackPolyCovariantKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.INTERFACE, "callbackPolyCovariant");
+  }
+
+  @Test
+  public void demandSpecialSingleKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.SPECIAL, "single");
+  }
+
+  @Test
+  public void demandSpecialCovariantKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.SPECIAL, "covariant");
+  }
+
+  @Test
+  public void demandSpecialCallbackPolyKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.SPECIAL, "callbackPoly");
+  }
+
+  @Test
+  public void demandSpecialCallbackPolyCovariantKeepsCallbackContext() {
+    assertDemandPropagation(InvocationKind.SPECIAL, "callbackPolyCovariant");
+  }
+
+  @Test
+  public void demandVirtualPolymorphicApiKeepsItsOwnReceiver() {
+    assertDemandPropagation(InvocationKind.VIRTUAL, "apiPoly");
+  }
+
+  @Test
+  public void demandInterfacePolymorphicApiKeepsItsOwnReceiver() {
+    assertDemandPropagation(InvocationKind.INTERFACE, "apiPoly");
+  }
+
+  private void assertDemandPropagation(InvocationKind kind, String shape) {
+    boolean covariant = shape.contains("ovariant");
+    boolean callbackPoly = shape.startsWith("callbackPoly");
+    SootMethod declaration = callback.getMethodByName("accept");
+    if (covariant) {
+      declaration.setReturnType(RefType.v("java.lang.Object"));
+    }
+    SootMethod target = callbackMethod("example.DemandTask");
+    if (covariant) {
+      target.setReturnType(RefType.v("java.lang.String"));
+    }
+    SootField field = new SootField("saved", payload.getType(), Modifier.PUBLIC);
+    target.getDeclaringClass().addField(field);
+    savePayload(target, field, covariant);
+    SootClass apiType = dispatcher;
+    SootMethod api = schedule;
+    if (kind == InvocationKind.STATIC) {
+      api = new SootMethod("scheduleStatic", schedule.getParameterTypes(), VoidType.v(),
+          Modifier.PUBLIC | Modifier.STATIC | Modifier.NATIVE);
+      dispatcher.addMethod(api);
+    } else if (kind == InvocationKind.INTERFACE) {
+      apiType = new SootClass("example.ApiContract", Modifier.PUBLIC | Modifier.INTERFACE | Modifier.ABSTRACT);
+      Scene.v().addClass(apiType);
+      apiType.setLibraryClass();
+      api = new SootMethod("schedule", schedule.getParameterTypes(), VoidType.v(), Modifier.PUBLIC | Modifier.ABSTRACT);
+      apiType.addMethod(api);
+      dispatcher.addInterface(apiType);
+    }
+    SootClass app = newClass("example.DemandApplication", true);
+    if (kind == InvocationKind.SPECIAL) {
+      app.setSuperclass(dispatcher);
+    }
+    SootMethod entry = new SootMethod("entry", Collections.emptyList(), VoidType.v(),
+        Modifier.PUBLIC | (kind == InvocationKind.SPECIAL ? 0 : Modifier.STATIC));
+    app.addMethod(entry);
+    Body body = kind == InvocationKind.SPECIAL ? instanceBody(entry, false) : Jimple.v().newBody(entry);
+    entry.setActiveBody(body);
+    Local base = null;
+    if (kind == InvocationKind.SPECIAL) {
+      base = body.getThisLocal();
+    } else if (kind != InvocationKind.STATIC) {
+      base = Jimple.v().newLocal("api", apiType.getType());
+      body.getLocals().add(base);
+      if (shape.equals("apiPoly")) {
+        for (int i = 0; i < 2; i++) {
+          SootClass impl = newClass("example.DispatcherImpl" + i, true);
+          impl.setSuperclass(dispatcher);
+          impl.addMethod(new SootMethod("schedule", api.getParameterTypes(), VoidType.v(), Modifier.PUBLIC | Modifier.NATIVE));
+          Local concrete = allocate(body, "api" + i, impl);
+          body.getUnits().add(Jimple.v().newAssignStmt(base, concrete));
+        }
+      } else {
+        Local concrete = allocate(body, "concreteApi", dispatcher);
+        body.getUnits().add(Jimple.v().newAssignStmt(base, concrete));
+      }
+    }
+    Local first = allocate(body, "firstTask", target.getDeclaringClass());
+    Local second = allocate(body, "secondTask", target.getDeclaringClass());
+    Local firstValue = allocate(body, "firstValue", payload);
+    Local secondValue = allocate(body, "secondValue", payload);
+    Local dispatchTask = first;
+    SootMethod otherTarget = null;
+    if (callbackPoly) {
+      SootClass other = newClass("example.OtherTask", true);
+      other.setSuperclass(target.getDeclaringClass());
+      otherTarget = new SootMethod("accept", target.getParameterTypes(), target.getReturnType(), Modifier.PUBLIC);
+      other.addMethod(otherTarget);
+      savePayload(otherTarget, field, covariant);
+      Local concrete = allocate(body, "otherTask", other);
+      dispatchTask = Jimple.v().newLocal("dispatchTask", callback.getType());
+      body.getLocals().add(dispatchTask);
+      body.getUnits().add(Jimple.v().newAssignStmt(dispatchTask, first));
+      body.getUnits().add(Jimple.v().newAssignStmt(dispatchTask, concrete));
+    }
+    Stmt firstCall = invocation(kind, base, api, dispatchTask, firstValue);
+    Stmt secondCall = invocation(kind, base, api, second, secondValue);
+    body.getUnits().add(firstCall);
+    body.getUnits().add(secondCall);
+    Local result = Jimple.v().newLocal("result", payload.getType());
+    body.getLocals().add(result);
+    body.getUnits().add(Jimple.v().newAssignStmt(result, Jimple.v().newInstanceFieldRef(first, field.makeRef())));
+    body.getUnits().add(Jimple.v().newReturnVoidStmt());
+    DirectTarget direct = new DirectTarget(callback.getType(), new MethodSubSignature(declaration.makeRef()), 0);
+    direct.getParameterMappings().add(new DirectParameterMapping(1, 0));
+    VirtualEdge local = new VirtualEdge(Kind.GENERIC_FAKE, null, direct);
+    runWithCustomBuilder(entry, method -> {
+      if (method == entry) {
+        firstCall.addTag(new VirtualEdgeSummaryTag(local));
+        secondCall.addTag(new VirtualEdgeSummaryTag(local));
+      }
+    }, true);
+    ContextSensitiveInfo info = new ContextSensitiveInfo(capturedPAG);
+    assertEquals("Two model invocations must have distinct contexts", 2, info.getCallSitesInvokingMethod(target).size());
+    for (Integer id : info.getCallSitesInvokingMethod(target)) {
+      assertSame("Retain the contract declaration, including covariant returns", declaration, info.getInvokedMethod(id));
+      assertSame(entry, info.getInvokingMethod(id));
+      assertTrue(info.isVirtCall(id));
+    }
+    if (callbackPoly) {
+      Integer id = info.getCallSitesInvokingMethod(otherTarget).iterator().next();
+      assertEquals("One logical invocation can dispatch to multiple implementations", 2, info.getCallSiteTargets(id).size());
+    }
+    if (shape.equals("apiPoly")) {
+      int ordinary = 0;
+      for (Integer id : info.getCallSitesInMethod(entry)) {
+        if (info.getInvokedMethod(id) == api) {
+          ordinary++;
+          boolean recordedReceiver = capturedPAG.virtualCallsToReceivers.containsKey(firstCall.getInvokeExpr());
+          assertEquals("Keep the ordinary API's existing receiver metadata", recordedReceiver, info.isVirtCall(id));
+          if (recordedReceiver) {
+            assertSame(capturedPAG.findLocalVarNode(base), info.getReceiverForVirtCallSite(id));
+          }
+          assertEquals(2, info.getCallSiteTargets(id).size());
+        }
+      }
+      assertEquals("The ordinary API keeps its own identities", 2, ordinary);
+    }
+    DemandCSPointsTo demand = (DemandCSPointsTo) Scene.v().getPointsToAnalysis();
+    assertTrue("Use the normal call graph refinement", demand.isRefineCallGraph());
+    PointsToSet values = demand.reachingObjects(result);
+    assertTrue("Keep the selected callback payload", values.hasNonEmptyIntersection(demand.reachingObjects(firstValue)));
+    assertFalse("Exclude the other callback object's payload", values.hasNonEmptyIntersection(demand.reachingObjects(secondValue)));
+    assertTrue(hasTarget(Scene.v().getCallGraph(), firstCall, target));
+  }
+
+  @Test
+  public void demandArrayReceiverWithoutAnExplicitTargetTypeUsesTheObjectDeclaration() {
+    SootMethod clone = Scene.v().getObjectType().getSootClass().getMethod("java.lang.Object clone()");
+    ArrayType arrayType = ArrayType.v(payload.getType(), 1);
+    SootClass app = newClass("example.ArrayApplication", true);
+    SootMethod entry = new SootMethod("entry", Collections.emptyList(), VoidType.v(), Modifier.PUBLIC | Modifier.STATIC);
+    app.addMethod(entry);
+    Body body = Jimple.v().newBody(entry);
+    entry.setActiveBody(body);
+    Local array = Jimple.v().newLocal("array", arrayType);
+    body.getLocals().add(array);
+    body.getUnits().add(Jimple.v().newAssignStmt(array, Jimple.v().newNewArrayExpr(payload.getType(), IntConstant.v(1))));
+    Stmt invocation = Jimple.v().newInvokeStmt(Jimple.v().newVirtualInvokeExpr(array, clone.makeRef()));
+    body.getUnits().add(invocation);
+    body.getUnits().add(Jimple.v().newReturnVoidStmt());
+    VirtualEdge summary = new VirtualEdge(Kind.GENERIC_FAKE, null,
+        new DirectTarget(null, new MethodSubSignature(clone.makeRef())));
+    runWithCustomBuilder(entry, method -> {
+      if (method == entry) invocation.addTag(new VirtualEdgeSummaryTag(summary));
+    }, true);
+    assertTrue(hasTarget(Scene.v().getCallGraph(), invocation, clone));
+    ContextSensitiveInfo info = new ContextSensitiveInfo(capturedPAG);
+    assertEquals("Keep both identities even when the API and callback declarations coincide", 2,
+        info.getCallSitesInvokingMethod(clone).size());
+    int modelCalls = 0;
+    for (Integer callSite : info.getCallSitesInvokingMethod(clone)) {
+      assertSame(clone, info.getInvokedMethod(callSite));
+      if (info.isVirtCall(callSite)) {
+        modelCalls++;
+        assertSame(capturedPAG.findLocalVarNode(array), info.getReceiverForVirtCallSite(callSite));
+      }
+    }
+    assertEquals(1, modelCalls);
+  }
+
+  private static void savePayload(SootMethod method, SootField field, boolean covariant) {
+    Body body = instanceBody(method, true);
+    body.getUnits().add(Jimple.v().newAssignStmt(Jimple.v().newInstanceFieldRef(body.getThisLocal(), field.makeRef()),
+        body.getParameterLocal(0)));
+    body.getUnits().add(covariant ? Jimple.v().newReturnStmt(NullConstant.v()) : Jimple.v().newReturnVoidStmt());
+  }
+
+  private static Stmt invocation(InvocationKind kind, Local base, SootMethod api, Local task, Local value) {
+    if (kind == InvocationKind.STATIC) {
+      return Jimple.v().newInvokeStmt(Jimple.v().newStaticInvokeExpr(api.makeRef(), task, value));
+    } else if (kind == InvocationKind.SPECIAL) {
+      return Jimple.v().newInvokeStmt(Jimple.v().newSpecialInvokeExpr(base, api.makeRef(), task, value));
+    } else if (kind == InvocationKind.INTERFACE) {
+      return Jimple.v().newInvokeStmt(Jimple.v().newInterfaceInvokeExpr(base, api.makeRef(), task, value));
+    }
+    return Jimple.v().newInvokeStmt(Jimple.v().newVirtualInvokeExpr(base, api.makeRef(), task, value));
+  }
+
+  @Test
+  public void suppressionOnlyDisablesTheSelectedStatementDuringConstruction() {
+    SootMethod target = callbackMethod("example.DefaultTask");
+    Body callbackBody = instanceBody(target, true);
+    callbackBody.getUnits().add(Jimple.v().newReturnVoidStmt());
+    SootClass app = newClass("example.SuppressionApplication", true);
+    SootMethod entry = new SootMethod("entry", Collections.emptyList(), VoidType.v(), Modifier.PUBLIC | Modifier.STATIC);
+    app.addMethod(entry);
+    Body body = Jimple.v().newBody(entry);
+    entry.setActiveBody(body);
+    Local receiver = allocate(body, "dispatcher", dispatcher);
+    Local suppressed = allocate(body, "suppressed", target.getDeclaringClass());
+    Local retained = allocate(body, "retained", target.getDeclaringClass());
+    Local value = allocate(body, "value", payload);
+    Stmt first = invocation(InvocationKind.VIRTUAL, receiver, schedule, suppressed, value);
+    Stmt second = invocation(InvocationKind.VIRTUAL, receiver, schedule, retained, value);
+    body.getUnits().add(first);
+    body.getUnits().add(second);
+    body.getUnits().add(Jimple.v().newReturnVoidStmt());
+    defaultSummaries = new VirtualEdgesSummaries(Collections.singletonList(summary(second)));
+    runWithCustomBuilder(entry, method -> {
+      if (method == entry) {
+        first.addTag(new VirtualEdgeSummaryTag(null));
+      }
+    });
+    assertTrue(hasTarget(Scene.v().getCallGraph(), first, schedule));
+    assertTrue(hasTarget(Scene.v().getCallGraph(), second, schedule));
+    assertFalse(hasTarget(Scene.v().getCallGraph(), first, target));
+    assertTrue(hasTarget(Scene.v().getCallGraph(), second, target));
+    assertTrue(Scene.v().getPointsToAnalysis().reachingObjects(callbackBody.getThisLocal())
+        .hasNonEmptyIntersection(Scene.v().getPointsToAnalysis().reachingObjects(retained)));
+    assertFalse(Scene.v().getPointsToAnalysis().reachingObjects(callbackBody.getThisLocal())
+        .hasNonEmptyIntersection(Scene.v().getPointsToAnalysis().reachingObjects(suppressed)));
+  }
+
   private static void runWithCustomBuilder(SootMethod entry, Consumer<SootMethod> prepare) {
+    runWithCustomBuilder(entry, prepare, false);
+  }
+
+  private static void runWithCustomBuilder(SootMethod entry, Consumer<SootMethod> prepare, boolean demand) {
     Scene.v().setEntryPoints(Collections.singletonList(entry));
     Map<String, String> options = new HashMap<>(PhaseOptions.v().getPhaseOptions("cg.spark"));
     options.put("enabled", "true");
     options.put("on-fly-cg", "true");
     options.put("simulate-natives", "false");
+    options.put("cs-demand", Boolean.toString(demand));
+    options.put("lazy-pts", "false");
+    options.put("traversal", "1000000");
+    options.put("passes", "10");
     PackManager.v().getPack("cg").remove("cg.spark");
     PackManager.v().getPack("cg").add(new Transform("cg.spark", new ModelingSparkTransformer(prepare)));
     options.forEach((key, value) -> assertTrue(PhaseOptions.v().setPhaseOption("cg.spark", key + ":" + value)));
@@ -345,6 +691,12 @@ public class CallSiteVirtualEdgesTest {
 
     private ModelingSparkTransformer(Consumer<SootMethod> prepare) {
       this.prepare = prepare;
+    }
+
+    @Override
+    protected void propagatePAG(soot.options.SparkOptions opts, PAG pag) {
+      capturedPAG = pag;
+      super.propagatePAG(opts, pag);
     }
 
     @Override
@@ -380,6 +732,11 @@ public class CallSiteVirtualEdgesTest {
         Consumer<SootMethod> prepare) {
       super(cm, reachable, appOnly);
       this.prepare = prepare;
+    }
+
+    @Override
+    protected VirtualEdgesSummaries initializeEdgeSummaries() {
+      return defaultSummaries == null ? super.initializeEdgeSummaries() : defaultSummaries;
     }
 
     @Override
