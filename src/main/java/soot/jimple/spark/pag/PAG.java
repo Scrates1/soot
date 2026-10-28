@@ -26,9 +26,13 @@ import com.google.common.collect.HashBasedTable;
 import com.google.common.collect.Table;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -37,6 +41,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import soot.AnySubType;
+import soot.ArrayType;
 import soot.Context;
 import soot.FastHierarchy;
 import soot.Kind;
@@ -133,6 +138,7 @@ public class PAG implements PointsToAnalysis {
       virtualCallsToReceivers = new HashMap<InvokeExpr, Node>();
       callToMethod = new HashMap<InvokeExpr, SootMethod>();
       callAssigns = new HashMultiMap<InvokeExpr, Pair<Node, Node>>();
+      callSiteModelCalls = new IdentityHashMap<>();
     }
     switch (opts.set_impl()) {
       case SparkOptions.set_impl_hash:
@@ -1136,6 +1142,22 @@ public class PAG implements PointsToAnalysis {
               // Make an edge from caller.argument to callee.this
               addEdge(parm, thiz);
               pval = addInterproceduralAssignment(parm, thiz, e);
+              if (matchedSummary && callSiteModelCalls != null) {
+                RefType declaringType = ieEdgeTgt.getTargetType();
+                if (declaringType == null) {
+                  // VirtualCalls resolves array receivers against Object as well.
+                  declaringType = local.getType() instanceof ArrayType ? Scene.v().getObjectType()
+                      : (RefType) local.getType();
+                }
+                SootMethod declaration = Scene.v()
+                    .makeMethodRef(declaringType.getSootClass(), ieEdgeTgt.getTargetMethod(), false).resolve();
+                CallSiteModelCall modelCall = callSiteModelCalls.get(e.srcStmt());
+                if (modelCall == null) {
+                  modelCall = new CallSiteModelCall(e.srcStmt(), e.src(), declaration, parm);
+                  callSiteModelCalls.put(e.srcStmt(), modelCall);
+                }
+                modelCall.assignments.add(pval);
+              }
 
               // We need to ensure that the target method exists, at least as a phantom
               if (local.getType() instanceof RefType) {
@@ -1160,7 +1182,10 @@ public class PAG implements PointsToAnalysis {
                   from = srcmpag.parameterize(from, e.srcCtxt()).getReplacement();
                   to = tgtmpag.parameterize(to, e.tgtCtxt()).getReplacement();
                   addEdge(from, to);
-                  addInterproceduralAssignment(from, to, e);
+                  Pair<Node, Node> assignment = addInterproceduralAssignment(from, to, e);
+                  if (callSiteModelCalls != null) {
+                    callSiteModelCalls.get(e.srcStmt()).assignments.add(assignment);
+                  }
                 }
               }
             }
@@ -1643,6 +1668,50 @@ public class PAG implements PointsToAnalysis {
   }
 
   public NativeMethodDriver nativeMethodDriver;
+
+  // Only local summaries need separate identities; legacy global summaries retain their existing behavior.
+  private Map<Stmt, CallSiteModelCall> callSiteModelCalls;
+
+  public Collection<CallSiteModelCall> getCallSiteModelCalls() {
+    return callSiteModelCalls == null ? Collections.emptyList()
+        : Collections.unmodifiableCollection(callSiteModelCalls.values());
+  }
+
+  /** One logical summary invocation, independently of the original API and its resolved implementations. */
+  public static final class CallSiteModelCall {
+    private final Stmt statement;
+    private final SootMethod invokingMethod;
+    private final SootMethod invokedMethod;
+    private final Node receiver;
+    private final Set<Pair<Node, Node>> assignments = new LinkedHashSet<>();
+
+    private CallSiteModelCall(Stmt statement, SootMethod invokingMethod, SootMethod invokedMethod, Node receiver) {
+      this.statement = statement;
+      this.invokingMethod = invokingMethod;
+      this.invokedMethod = invokedMethod;
+      this.receiver = receiver;
+    }
+
+    public Stmt getStatement() {
+      return statement;
+    }
+
+    public SootMethod getInvokingMethod() {
+      return invokingMethod;
+    }
+
+    public SootMethod getInvokedMethod() {
+      return invokedMethod;
+    }
+
+    public Node getReceiver() {
+      return receiver;
+    }
+
+    public Set<Pair<Node, Node>> getAssignments() {
+      return Collections.unmodifiableSet(assignments);
+    }
+  }
 
   public HashMultiMap<InvokeExpr, Pair<Node, Node>> callAssigns;
   public Map<InvokeExpr, SootMethod> callToMethod;
