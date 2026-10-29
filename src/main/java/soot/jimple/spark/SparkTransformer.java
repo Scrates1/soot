@@ -82,7 +82,6 @@ public class SparkTransformer extends SceneTransformer {
   }
 
   public SparkTransformer(Singletons.Global g) {
-    this();
   }
 
   public static SparkTransformer v() {
