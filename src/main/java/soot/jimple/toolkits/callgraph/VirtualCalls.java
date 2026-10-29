@@ -135,6 +135,13 @@ public class VirtualCalls {
     if (t instanceof ArrayType) {
       t = Scene.v().getObjectType();
     }
+    if (t instanceof AnySubType && sigType instanceof RefType) {
+      // Intersect the bounds before applying the usual store check. An abstract
+      // base may provide a concrete method inherited by an unknown subtype even
+      // when no concrete implementation is loaded in the Scene.
+      resolveBoundedAnySubType(((AnySubType) t).getBase(), declaredType, (RefType) sigType, callee, targets, appOnly);
+      return;
+    }
     FastHierarchy fastHierachy = Scene.v().getOrMakeFastHierarchy();
     if (declaredType != null && !fastHierachy.canStoreType(t, declaredType)) {
       return;
@@ -159,9 +166,7 @@ public class VirtualCalls {
        *
        * Since Java has no multiple inheritance call by signature resolution is only activated if the base is an interface.
        */
-      if (sigType instanceof RefType) {
-        resolveBoundedAnySubType(base, declaredType, (RefType) sigType, callee, targets, appOnly);
-      } else if (options.library() == CGOptions.library_signature_resolution && base.getSootClass().isInterface()) {
+      if (options.library() == CGOptions.library_signature_resolution && base.getSootClass().isInterface()) {
         LOGGER.warn("Deprecated library dispatch is conducted. The results might be unsound...");
         resolveLibrarySignature(declaredType, sigType, callee, container, targets, appOnly, base);
       } else {

@@ -63,6 +63,14 @@ public final class VirtualEdgeSummaryTag implements Tag {
         if (!(mapping instanceof DirectParameterMapping)) {
           throw new IllegalArgumentException("Call-site summaries require direct parameter mappings");
         }
+        DirectParameterMapping direct = (DirectParameterMapping) mapping;
+        if (direct.getSourceIndex() < -1) {
+          throw new IllegalArgumentException("Call-site summary source indexes must be -1 or non-negative");
+        }
+        if (direct.getTargetIndex() < -1
+            || direct.getTargetIndex() >= target.getTargetMethod().getParameterTypes().size()) {
+          throw new IllegalArgumentException("Call-site summary target parameter index is out of range");
+        }
       }
     }
     this.summary = summary;
