@@ -339,22 +339,22 @@ public class FastHierarchy {
         // From Java Language Spec 2nd ed., Chapter 10, Arrays
         return base == rtObject || base == rtSerializable || base == rtCloneable || base instanceof WeakObjectType;
       } else {
-        // We can story any_subtype_of(x) in a variable of type x
+        // We can story any_subtype_of(x) in a variable of type x, or in any supertype of x
         RefType childBase = ((AnySubType) child).getBase();
-        if (childBase == parent) {
+        SootClass base = childBase.getSootClass();
+        final SootClass parentClass = ((RefType) parent).getSootClass();
+        if (childBase == parent || canStoreClass(base, parentClass)) {
           return true;
         }
 
-        // If the child is any_subtype_of(x) and the parent is not x, this only works if all known subclasses of x
-        // cast-compatible to the parent
+        // If the child is any_subtype_of(x) and the parent is unrelated to x, this only works if a known concrete
+        // subclass of x is cast-compatible to the parent
         Deque<SootClass> worklist = new ArrayDeque<SootClass>();
-        SootClass base = childBase.getSootClass();
         if (base.isInterface()) {
           worklist.addAll(getAllImplementersOfInterface(base));
         } else {
           worklist.add(base);
         }
-        final SootClass parentClass = ((RefType) parent).getSootClass();
         {
           Set<SootClass> workset = new HashSet<>();
           SootClass cl;
@@ -688,6 +688,47 @@ public class FastHierarchy {
   public Set<SootMethod> resolveAbstractDispatch(SootClass baseType, SootMethodRef m) {
     Pair<SootClass, SootMethodRef> pair = new Pair<>(baseType, m);
     return methodRefToAbstractMethods.computeIfAbsent(pair, abstractMethodComputation);
+  }
+
+  /**
+   * Given an object whose runtime type is an unknown subtype of both baseType and boundType, returns the methods which could
+   * be called on an o.f() invocation. The receiver class, not the class declaring the resolved method, has to satisfy both
+   * bounds: an implementation inherited from outside boundType is kept when a receiver inside boundType inherits it.
+   *
+   * @param baseType
+   *          The declared type C of the object
+   * @param boundType
+   *          A second type the object is known to be compatible with
+   */
+  public Set<SootMethod> resolveAbstractDispatch(SootClass baseType, SootClass boundType, SootMethodRef m) {
+    if (canStoreClass(baseType, boundType)) {
+      return resolveAbstractDispatch(baseType, m);
+    }
+    if (canStoreClass(boundType, baseType)) {
+      return resolveAbstractDispatch(boundType, m);
+    }
+    HashSet<SootMethod> ret = new HashSet<>();
+    HashSet<SootClass> visited = new HashSet<>();
+    ArrayDeque<SootClass> worklist = new ArrayDeque<>();
+    worklist.add(baseType);
+    SootClass receiverType;
+    while ((receiverType = worklist.poll()) != null) {
+      if (!visited.add(receiverType)) {
+        continue;
+      }
+      if (receiverType.isInterface()) {
+        worklist.addAll(getAllImplementersOfInterface(receiverType));
+        continue;
+      }
+      worklist.addAll(getSubclassesOf(receiverType));
+      if (canStoreClass(receiverType, boundType)) {
+        SootMethod resolvedMethod = resolveMethod(receiverType, m, false);
+        if (resolvedMethod != null) {
+          ret.add(resolvedMethod);
+        }
+      }
+    }
+    return ret;
   }
 
   protected Set<SootMethod> doResolveAbstractDispatch(SootClass baseType, SootMethodRef m) {

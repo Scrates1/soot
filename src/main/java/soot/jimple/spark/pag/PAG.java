@@ -948,15 +948,7 @@ public class PAG implements PointsToAnalysis {
 
   public boolean addAllocEdge(AllocNode from, VarNode to) {
     FastHierarchy fh = typeManager.getFastHierarchy();
-    Type allocatedType = from.getType();
-    boolean compatible = fh == null || to.getType() == null || fh.canStoreType(allocatedType, to.getType());
-    if (!compatible && allocatedType instanceof AnySubType) {
-      // FastHierarchy only considers known concrete classes for an AnySubType
-      // cast to a different interface. The unknown subtype may inherit the
-      // base class's interface contract, so retain that assignment as well.
-      compatible = fh.canStoreType(((AnySubType) allocatedType).getBase(), to.getType());
-    }
-    if (compatible) {
+    if (fh == null || to.getType() == null || fh.canStoreType(from.getType(), to.getType())) {
       if (doAddAllocEdge(from, to)) {
         edgeQueue.add(from);
         edgeQueue.add(to);
