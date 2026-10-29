@@ -63,3 +63,13 @@ Linux 完整验证耗时 362.644 秒，仅表示本轮测试运行时间，不�
 中间运行还保留了指定测试未匹配到另一个 Surefire 阶段、格式行长、引用常量未开启精确字符串选项，以及一次在回迁前执行的内部基线构建。它们均单独标识，未作为最终修复验证。
 
 证据根目录为 `%TEMP%/stsa-soot-callback-general-20261028/`。第一轮证据未覆盖；当前日志使用 `reviewfix-` 前缀，最终 Linux 报告位于 `reviewfix3-linux/`，制品独立检查位于 `reviewfix3-package/`，最终不可覆盖的摘要台账及脱敏副本位于 `reviewfix-sealed/`。台账保存源码提交、文件摘要、原始/脱敏报告摘要、制品摘要和已有跳过身份；保留证据不依赖 Maven target。
+
+## 2026-10-29 代码审查跟进
+
+代码审查新增并修复两类边界：`AnySubType` 抽象基类实现了回调接口、但场景中没有已知具体子类时，PAG 原有赋值检查会先丢弃其 points-to 边；现保留基类已满足接收类型的赋值，并在有界动态分派前处理该未知类型。普通 SPARK 与 cs-demand 均增加了回归覆盖。调用点摘要同时校验 receiver/source/target 索引和静态调用的 base 用法，避免无效映射延迟崩溃或静默丢失参数。新增构图测试确认非空局部摘要会覆盖冲突的全局默认摘要及其参数映射。
+
+验证使用 JDK 11.0.30：
+
+- `CallSiteVirtualEdgesTest` 54 项及 `PhaseOptionsTest` 1 项通过。
+- `mvn -q -PJava11 surefire:test@default-test` 完整默认测试执行通过。
+- `mvn -q clean -Dmaven.test.skip=false -PJava11 verify` 在 Windows 系统测试 `Shimple1Test.testStdLib` 处无法完成：测试将 `jrt:/` 传给 `Paths.get`，触发 `InvalidPathException`。系统测试阶段报告 97 项、0 失败、1 错误、1 跳过；这是 Windows 路径处理限制，默认测试执行单独通过。

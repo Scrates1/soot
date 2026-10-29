@@ -129,6 +129,48 @@ public class CallSiteVirtualEdgesTest {
   }
 
   @Test
+  public void localOverrideReplacesDefaultTargetAndParameterMappingDuringConstruction() {
+    SootMethod defaultTarget = callbackMethod("example.DefaultOverrideTask");
+    Body defaultBody = instanceBody(defaultTarget, true);
+    defaultBody.getUnits().add(Jimple.v().newReturnVoidStmt());
+    SootMethod localTarget = callbackMethod("example.LocalOverrideTask");
+    Body localBody = instanceBody(localTarget, true);
+    localBody.getUnits().add(Jimple.v().newReturnVoidStmt());
+
+    Body body = entryBody("example.LocalOverrideApplication");
+    Local dispatcherLocal = allocate(body, "dispatcher", dispatcher);
+    Local defaultTask = allocate(body, "defaultTask", defaultTarget.getDeclaringClass());
+    Local defaultPayload = allocate(body, "defaultPayload", payload);
+    Local localTask = allocate(body, "localTask", localTarget.getDeclaringClass());
+    Local localPayload = allocate(body, "localPayload", payload);
+    SootMethod api = new SootMethod("scheduleOverride", Arrays.asList(callback.getType(), payload.getType(),
+        callback.getType(), payload.getType()), VoidType.v(), Modifier.PUBLIC | Modifier.NATIVE);
+    dispatcher.addMethod(api);
+    Stmt site = Jimple.v().newInvokeStmt(Jimple.v().newVirtualInvokeExpr(dispatcherLocal, api.makeRef(), defaultTask,
+        defaultPayload, localTask, localPayload));
+    DirectTarget defaultDirect = new DirectTarget(callback.getType(), new MethodSubSignature(defaultTarget.makeRef()), 0);
+    defaultDirect.getParameterMappings().add(new DirectParameterMapping(1, 0));
+    defaultSummaries = new VirtualEdgesSummaries(Collections.singletonList(new VirtualEdge(Kind.GENERIC_FAKE,
+        new InstanceinvokeSource(site), defaultDirect)));
+    DirectTarget localDirect = new DirectTarget(callback.getType(), new MethodSubSignature(localTarget.makeRef()), 2);
+    localDirect.getParameterMappings().add(new DirectParameterMapping(3, 0));
+    site.addTag(new VirtualEdgeSummaryTag(new VirtualEdge(Kind.GENERIC_FAKE, null, localDirect)));
+    body.getUnits().add(site);
+    body.getUnits().add(Jimple.v().newReturnVoidStmt());
+
+    runWithCustomBuilder(body.getMethod(), method -> { });
+    assertTrue(hasTarget(Scene.v().getCallGraph(), site, api));
+    assertTrue(hasTarget(Scene.v().getCallGraph(), site, localTarget));
+    assertFalse("The call-site override must replace the default target",
+        hasTarget(Scene.v().getCallGraph(), site, defaultTarget));
+    assertTrue(Scene.v().getPointsToAnalysis().reachingObjects(localBody.getParameterLocal(0))
+        .hasNonEmptyIntersection(Scene.v().getPointsToAnalysis().reachingObjects(localPayload)));
+    assertFalse("The default mapping must not leak into the local callback",
+        Scene.v().getPointsToAnalysis().reachingObjects(localBody.getParameterLocal(0))
+            .hasNonEmptyIntersection(Scene.v().getPointsToAnalysis().reachingObjects(defaultPayload)));
+  }
+
+  @Test
   public void localSuppressionDoesNotRemoveTheGlobalSummary() {
     VirtualEdge existing = summary(call);
     VirtualEdgesSummaries summaries = new VirtualEdgesSummaries(Collections.singletonList(existing));
@@ -764,6 +806,60 @@ public class CallSiteVirtualEdgesTest {
     assertEquals(2, capturedPAG.getCallSiteModelCalls().iterator().next().getAssignments().size());
   }
 
+  @Test(expected = IllegalArgumentException.class)
+  public void invalidCallbackParameterMappingIsRejectedWhenTagged() {
+    DirectTarget direct = new DirectTarget(callback.getType(),
+        new MethodSubSignature(callback.getMethod("void accept(example.Payload)").makeRef()), 0);
+    direct.getParameterMappings().add(new DirectParameterMapping(1, 1));
+    new VirtualEdgeSummaryTag(new VirtualEdge(Kind.GENERIC_FAKE, null, direct));
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void invalidSourceArgumentMappingIsRejectedDuringGraphConstruction() {
+    SootMethod target = callbackMethod("example.InvalidSourceMappingTask");
+    instanceBody(target, true).getUnits().add(Jimple.v().newReturnVoidStmt());
+    Body body = entryBody("example.InvalidSourceMappingApplication");
+    Local task = allocate(body, "task", target.getDeclaringClass());
+    Local value = allocate(body, "payload", payload);
+    SootMethod api = new SootMethod("scheduleInvalidSource", Arrays.asList(target.getDeclaringClass().getType(),
+        payload.getType()), VoidType.v(), Modifier.PUBLIC | Modifier.STATIC | Modifier.NATIVE);
+    dispatcher.addMethod(api);
+    Stmt site = Jimple.v().newInvokeStmt(Jimple.v().newStaticInvokeExpr(api.makeRef(), task, value));
+    DirectTarget direct = new DirectTarget(target.getDeclaringClass().getType(), new MethodSubSignature(target.makeRef()), 0);
+    direct.getParameterMappings().add(new DirectParameterMapping(2, 0));
+    site.addTag(new VirtualEdgeSummaryTag(new VirtualEdge(Kind.GENERIC_FAKE, null, direct)));
+    body.getUnits().add(site);
+    body.getUnits().add(Jimple.v().newReturnVoidStmt());
+    runWithCustomBuilder(body.getMethod(), method -> { });
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void staticCallCannotUseTheMissingBaseAsSummaryReceiver() {
+    assertInvalidStaticReceiverSelector(-1);
+  }
+
+  @Test(expected = IllegalArgumentException.class)
+  public void outOfRangeArgumentCannotBeASummaryReceiver() {
+    assertInvalidStaticReceiverSelector(1);
+  }
+
+  private void assertInvalidStaticReceiverSelector(int receiverIndex) {
+    SootMethod target = callbackMethod("example.InvalidReceiverSelectorTask");
+    instanceBody(target, true).getUnits().add(Jimple.v().newReturnVoidStmt());
+    Body body = entryBody("example.InvalidReceiverSelectorApplication");
+    Local task = allocate(body, "task", target.getDeclaringClass());
+    SootMethod api = new SootMethod("scheduleInvalidReceiver", Collections.singletonList(task.getType()),
+        VoidType.v(), Modifier.PUBLIC | Modifier.STATIC | Modifier.NATIVE);
+    dispatcher.addMethod(api);
+    Stmt site = Jimple.v().newInvokeStmt(Jimple.v().newStaticInvokeExpr(api.makeRef(), task));
+    DirectTarget direct = new DirectTarget(target.getDeclaringClass().getType(), new MethodSubSignature(target.makeRef()),
+        receiverIndex);
+    site.addTag(new VirtualEdgeSummaryTag(new VirtualEdge(Kind.GENERIC_FAKE, null, direct)));
+    body.getUnits().add(site);
+    body.getUnits().add(Jimple.v().newReturnVoidStmt());
+    runWithCustomBuilder(body.getMethod(), method -> { });
+  }
+
   private static Body entryBody(String className) {
     SootClass app = newClass(className, true);
     SootMethod entry = new SootMethod("entry", Collections.emptyList(), VoidType.v(), Modifier.PUBLIC | Modifier.STATIC);
@@ -929,6 +1025,43 @@ public class CallSiteVirtualEdgesTest {
     runWithCustomBuilder(body.getMethod(), method -> { });
     assertTrue("An unknown concrete extension can inherit this implementation",
         hasTarget(Scene.v().getCallGraph(), site, target));
+  }
+
+  @Test
+  public void unknownAbstractInterfaceReceiverKeepsInheritedCallback() {
+    assertUnknownAbstractInterfaceReceiver(false);
+  }
+
+  @Test
+  public void unknownAbstractInterfaceReceiverKeepsInheritedCallbackInDemandAnalysis() {
+    assertUnknownAbstractInterfaceReceiver(true);
+  }
+
+  private void assertUnknownAbstractInterfaceReceiver(boolean demand) {
+    SootMethod target = callbackMethod("example.AbstractInterfaceReceiverTask");
+    target.getDeclaringClass().setModifiers(Modifier.PUBLIC | Modifier.ABSTRACT);
+    Body targetBody = instanceBody(target, true);
+    targetBody.getUnits().add(Jimple.v().newReturnVoidStmt());
+    Body body = entryBody("example.UnknownAbstractInterfaceApplication");
+    Local receiver = Jimple.v().newLocal("unknown", callback.getType());
+    body.getLocals().add(receiver);
+    body.getUnits().add(Jimple.v().newAssignStmt(receiver, NullConstant.v()));
+    SootMethod api = new SootMethod("scheduleAbstractInterface", Collections.singletonList(callback.getType()),
+        VoidType.v(), Modifier.PUBLIC | Modifier.STATIC | Modifier.NATIVE);
+    dispatcher.addMethod(api);
+    Stmt site = Jimple.v().newInvokeStmt(Jimple.v().newStaticInvokeExpr(api.makeRef(), receiver));
+    site.addTag(new VirtualEdgeSummaryTag(new VirtualEdge(Kind.GENERIC_FAKE, null,
+        new DirectTarget(callback.getType(), new MethodSubSignature(target.makeRef()), 0))));
+    body.getUnits().add(site);
+    body.getUnits().add(Jimple.v().newReturnVoidStmt());
+    beforePropagation = pag -> pag.addAllocEdge(pag.makeAllocNode("unknown-abstract-interface-callback",
+        AnySubType.v(target.getDeclaringClass().getType()), body.getMethod()), pag.findLocalVarNode(receiver));
+    runWithCustomBuilder(body.getMethod(), method -> { }, demand);
+    assertTrue("An unknown concrete extension inherits this callback implementation",
+        hasTarget(Scene.v().getCallGraph(), site, target));
+    if (demand) {
+      assertFalse(Scene.v().getPointsToAnalysis().reachingObjects(targetBody.getThisLocal()).isEmpty());
+    }
   }
 
   @Test(expected = IllegalArgumentException.class)

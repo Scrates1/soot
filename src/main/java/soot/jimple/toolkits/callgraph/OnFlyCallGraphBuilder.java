@@ -97,6 +97,8 @@ import soot.jimple.spark.pag.AllocDotField;
 import soot.jimple.toolkits.annotation.nullcheck.NullnessAnalysis;
 import soot.jimple.toolkits.callgraph.ConstantArrayAnalysis.ArrayTypes;
 import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.DeferredVirtualEdgeTarget;
+import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.AbstractParameterMapping;
+import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.DirectParameterMapping;
 import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.DirectTarget;
 import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.IndirectTarget;
 import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.InvocationVirtualEdgeTarget;
@@ -882,9 +884,34 @@ public class OnFlyCallGraphBuilder {
         InvokeExpr ie = s.getInvokeExpr();
         DirectTarget localTarget = getLocalSummaryTarget(s);
         if (localTarget != null) {
-          Value value = localTarget.isBase() ? ((InstanceInvokeExpr) ie).getBase() : ie.getArg(localTarget.getArgIndex());
+          Value value;
+          if (localTarget.isBase()) {
+            if (!(ie instanceof InstanceInvokeExpr)) {
+              throw new IllegalArgumentException("Call-site summary base receiver requires an instance invocation: " + s);
+            }
+            value = ((InstanceInvokeExpr) ie).getBase();
+          } else {
+            int receiverIndex = localTarget.getArgIndex();
+            if (receiverIndex < 0 || receiverIndex >= ie.getArgCount()) {
+              throw new IllegalArgumentException("Call-site summary receiver argument index is out of range: " + s);
+            }
+            value = ie.getArg(receiverIndex);
+          }
           if (!(value instanceof Local) && !(value instanceof NullConstant)) {
             throw new IllegalArgumentException("Call-site summary receivers require a Local or null constant");
+          }
+          for (AbstractParameterMapping mapping : localTarget.getParameterMappings()) {
+            if (!(mapping instanceof DirectParameterMapping)) {
+              throw new IllegalArgumentException("Call-site summaries require direct parameter mappings");
+            }
+            int sourceIndex = ((DirectParameterMapping) mapping).getSourceIndex();
+            if (sourceIndex == -1) {
+              if (!(ie instanceof InstanceInvokeExpr)) {
+                throw new IllegalArgumentException("Call-site summary base mappings require an instance invocation: " + s);
+              }
+            } else if (sourceIndex < 0 || sourceIndex >= ie.getArgCount()) {
+              throw new IllegalArgumentException("Call-site summary source argument index is out of range: " + s);
+            }
           }
         }
         if (ie instanceof InstanceInvokeExpr) {
