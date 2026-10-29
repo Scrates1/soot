@@ -186,71 +186,11 @@ public class ContextSensitiveInfo {
     for (Iterator iter = callAssigns.keySet().iterator(); iter.hasNext();) {
       InvokeExpr ie = (InvokeExpr) iter.next();
       Integer callSite = new Integer(callSiteNum++);
-      callSiteToInvokedMethod.put(callSite, ie.getMethod());
-      SootMethod invokingMethod = pag.callToMethod.get(ie);
-      callSiteToInvokingMethod.put(callSite, invokingMethod);
       if (PRINT_CALL_SITE_INFO) {
-        callSiteWriter.println(callSite + " " + callSiteToInvokingMethod.get(callSite) + " " + ie);
+        callSiteWriter.println(callSite + " " + pag.callToMethod.get(ie) + " " + ie);
       }
-      if (pag.virtualCallsToReceivers.containsKey(ie)) {
-        LocalVarNode receiver = (LocalVarNode) pag.virtualCallsToReceivers.get(ie);
-        assert receiver != null;
-        virtCallSiteToReceiver.put(callSite, receiver);
-        receiverToVirtCallSites.put(receiver, callSite);
-      }
-      Set curEdges = callAssigns.get(ie);
-      for (Iterator iterator = curEdges.iterator(); iterator.hasNext();) {
-        Pair callAssign = (Pair) iterator.next();
-        // for reflective calls, the "O1" value can actually be a FieldRefNode
-        // we simply ignore such cases here (appears to be sound)
-        if (!(callAssign.getO1() instanceof VarNode)) {
-          continue;
-        }
-        VarNode src = (VarNode) callAssign.getO1();
-        VarNode dst = (VarNode) callAssign.getO2();
-        if (skipNode(src)) {
-          continue;
-        }
-        ArraySet edges = getAssignBarEdges(src);
-        AssignEdge edge = null;
-        for (int i = 0; i < edges.size() && edge == null; i++) {
-          AssignEdge curEdge = (AssignEdge) edges.get(i);
-          if (curEdge.getDst() == dst) {
-            edge = curEdge;
-          }
-        }
-        assert edge != null : "no edge from " + src + " to " + dst;
-        boolean edgeFromOtherCallSite = edge.isCallEdge();
-        if (edgeFromOtherCallSite) {
-          edge = new AssignEdge(src, dst);
-        }
-        edge.setCallSite(callSite);
-        callSiteToEdges.put(callSite, edge);
-        if (SootUtil.isParamNode(dst)) {
-          // assert src instanceof LocalVarNode : src + " " + dst;
-          edge.setParamEdge();
-          SootMethod invokedMethod = ((LocalVarNode) dst).getMethod();
-          callSiteToTargets.put(callSite, invokedMethod);
-          callSitesInvokingMethod.put(invokedMethod, callSite);
-          // assert src instanceof LocalVarNode : src + " NOT LOCAL";
-          if (src instanceof LocalVarNode) {
-            callSitesInMethod.put(((LocalVarNode) src).getMethod(), callSite);
-          }
-        } else if (SootUtil.isRetNode(src)) {
-          edge.setReturnEdge();
-          SootMethod invokedMethod = ((LocalVarNode) src).getMethod();
-          callSiteToTargets.put(callSite, invokedMethod);
-          callSitesInvokingMethod.put(invokedMethod, callSite);
-          if (dst instanceof LocalVarNode) {
-            callSitesInMethod.put(((LocalVarNode) dst).getMethod(), callSite);
-          }
-        } else {
-          assert false : "weird call edge " + callAssign;
-        }
-        if (edgeFromOtherCallSite) {
-          addAssignEdge(edge);
-        }
-      }
+      registerCallSite(callSite, pag.callToMethod.get(ie), ie.getMethod(), pag.virtualCallsToReceivers.get(ie),
+          callAssigns.get(ie));
     }
     // System.err.println(callSiteNum + " call sites");
     assert callEdgesReasonable();
@@ -260,6 +200,69 @@ public class ContextSensitiveInfo {
     // assert assignEdgesWellFormed(pag) == null :
     // assignEdgesWellFormed(pag);
 
+  }
+
+  private void registerCallSite(Integer callSite, SootMethod invokingMethod, SootMethod declaration,
+      Node receiverNode, Set curEdges) {
+    callSiteToInvokedMethod.put(callSite, declaration);
+    callSiteToInvokingMethod.put(callSite, invokingMethod);
+    if (receiverNode != null) {
+      LocalVarNode receiver = (LocalVarNode) receiverNode;
+      virtCallSiteToReceiver.put(callSite, receiver);
+      receiverToVirtCallSites.put(receiver, callSite);
+    }
+    for (Iterator iterator = curEdges.iterator(); iterator.hasNext();) {
+      Pair callAssign = (Pair) iterator.next();
+      // for reflective calls, the "O1" value can actually be a FieldRefNode
+      // we simply ignore such cases here (appears to be sound)
+      if (!(callAssign.getO1() instanceof VarNode)) {
+        continue;
+      }
+      VarNode src = (VarNode) callAssign.getO1();
+      VarNode dst = (VarNode) callAssign.getO2();
+      if (skipNode(src)) {
+        continue;
+      }
+      ArraySet edges = getAssignBarEdges(src);
+      AssignEdge edge = null;
+      for (int i = 0; i < edges.size() && edge == null; i++) {
+        AssignEdge curEdge = (AssignEdge) edges.get(i);
+        if (curEdge.getDst() == dst) {
+          edge = curEdge;
+        }
+      }
+      assert edge != null : "no edge from " + src + " to " + dst;
+      boolean edgeFromOtherCallSite = edge.isCallEdge();
+      if (edgeFromOtherCallSite) {
+        edge = new AssignEdge(src, dst);
+      }
+      edge.setCallSite(callSite);
+      callSiteToEdges.put(callSite, edge);
+      if (SootUtil.isParamNode(dst)) {
+        // assert src instanceof LocalVarNode : src + " " + dst;
+        edge.setParamEdge();
+        SootMethod invokedMethod = ((LocalVarNode) dst).getMethod();
+        callSiteToTargets.put(callSite, invokedMethod);
+        callSitesInvokingMethod.put(invokedMethod, callSite);
+        // assert src instanceof LocalVarNode : src + " NOT LOCAL";
+        if (src instanceof LocalVarNode) {
+          callSitesInMethod.put(((LocalVarNode) src).getMethod(), callSite);
+        }
+      } else if (SootUtil.isRetNode(src)) {
+        edge.setReturnEdge();
+        SootMethod invokedMethod = ((LocalVarNode) src).getMethod();
+        callSiteToTargets.put(callSite, invokedMethod);
+        callSitesInvokingMethod.put(invokedMethod, callSite);
+        if (dst instanceof LocalVarNode) {
+          callSitesInMethod.put(((LocalVarNode) dst).getMethod(), callSite);
+        }
+      } else {
+        assert false : "weird call edge " + callAssign;
+      }
+      if (edgeFromOtherCallSite) {
+        addAssignEdge(edge);
+      }
+    }
   }
 
   private boolean callEdgesReasonable() {
