@@ -192,6 +192,14 @@ public class ContextSensitiveInfo {
       registerCallSite(callSite, pag.callToMethod.get(ie), ie.getMethod(), pag.virtualCallsToReceivers.get(ie),
           callAssigns.get(ie));
     }
+    for (PAG.CallSiteModelCall modelCall : pag.getCallSiteModelCalls()) {
+      Integer callSite = Integer.valueOf(callSiteNum++);
+      if (PRINT_CALL_SITE_INFO) {
+        callSiteWriter.println(callSite + " " + modelCall.getInvokingMethod() + " model " + modelCall.getStatement());
+      }
+      registerCallSite(callSite, modelCall.getInvokingMethod(), modelCall.getInvokedMethod(), modelCall.getReceiver(),
+          modelCall.getAssignments());
+    }
     // System.err.println(callSiteNum + " call sites");
     assert callEdgesReasonable();
     if (PRINT_CALL_SITE_INFO) {

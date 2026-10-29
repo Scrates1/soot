@@ -26,9 +26,13 @@ import com.google.common.collect.HashBasedTable;
 import com.google.common.collect.Table;
 
 import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.IdentityHashMap;
 import java.util.Iterator;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -37,6 +41,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import soot.AnySubType;
+import soot.ArrayType;
 import soot.Context;
 import soot.FastHierarchy;
 import soot.Kind;
@@ -81,8 +86,12 @@ import soot.jimple.spark.sets.SharedListSet;
 import soot.jimple.spark.sets.SortedArraySet;
 import soot.jimple.spark.solver.OnFlyCallGraph;
 import soot.jimple.toolkits.callgraph.Edge;
+import soot.jimple.toolkits.callgraph.VirtualEdgeSummaryTag;
 import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries;
+import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.AbstractParameterMapping;
 import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.DeferredVirtualEdgeTarget;
+import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.DirectParameterMapping;
+import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.DirectTarget;
 import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.InstanceinvokeSource;
 import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.InvocationVirtualEdgeTarget;
 import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.StaticinvokeSource;
@@ -129,6 +138,7 @@ public class PAG implements PointsToAnalysis {
       virtualCallsToReceivers = new HashMap<InvokeExpr, Node>();
       callToMethod = new HashMap<InvokeExpr, SootMethod>();
       callAssigns = new HashMultiMap<InvokeExpr, Pair<Node, Node>>();
+      callSiteModelCalls = new IdentityHashMap<>();
     }
     switch (opts.set_impl()) {
       case SparkOptions.set_impl_hash:
@@ -1083,6 +1093,18 @@ public class PAG implements PointsToAnalysis {
     return assign2edges.get(val);
   }
 
+  private Node constrainCallSiteReceiver(Edge edge, MethodPAG source, Node receiver, RefType requiredType) {
+    if (requiredType == null || Scene.v().getOrMakeFastHierarchy().canStoreType(receiver.getType(), requiredType)) {
+      return receiver;
+    }
+    // As for a cast node, restrict the receiver before passing it into an inherited
+    // method whose this type may be wider than the summary's declared target type.
+    Node constrained = makeLocalVarNode(new Pair<>(edge.srcStmt(), "call-site-summary-receiver"), requiredType, edge.src());
+    constrained = source.parameterize(constrained, edge.srcCtxt()).getReplacement();
+    addEdge(receiver, constrained);
+    return constrained;
+  }
+
   public void addCallTarget(Edge e) {
     if (!e.passesParameters()) {
       return;
@@ -1097,14 +1119,9 @@ public class PAG implements PointsToAnalysis {
       }
       VirtualEdgesSummaries summaries = getOnFlyCallGraph().ofcgb().getVirtualEdgeSummaries();
       InvokeExpr ie = e.srcStmt().getInvokeExpr();
-      VirtualEdge ve = null;
-      if (ie instanceof InstanceInvokeExpr) {
-        ve = summaries.getVirtualEdgesMatchingSubSig(new MethodSubSignature(ie.getMethodRef().getSubSignature()));
-      } else if (ie instanceof StaticInvokeExpr) {
-        ve = summaries.getVirtualEdgesMatchingFunction(ie.getMethodRef().getSignature());
-      }
+      VirtualEdge ve = summaries.getVirtualEdgesMatchingCallSite(e.srcStmt());
       boolean isExpectedType = false;
-      if (e.srcStmt().hasTag(ExpectedTypeTag.NAME)) {
+      if (!e.srcStmt().hasTag(VirtualEdgeSummaryTag.NAME) && e.srcStmt().hasTag(ExpectedTypeTag.NAME)) {
         ExpectedTypeTag tag = (ExpectedTypeTag) e.srcStmt().getTag(ExpectedTypeTag.NAME);
         ve = new VirtualEdge(Kind.GENERIC_FAKE, null, new DeferredVirtualEdgeTarget(tag.getExpectedType()));
         isExpectedType = true;
@@ -1117,14 +1134,20 @@ public class PAG implements PointsToAnalysis {
       // The source is equal for direct and indirect targets
       VirtualEdgeSource edgeSrc = ve.getSource();
 
-      if (edgeSrc instanceof InstanceinvokeSource || edgeSrc instanceof StaticinvokeSource || isExpectedType) {
+      boolean matchedSummary = e.srcStmt().hasTag(VirtualEdgeSummaryTag.NAME);
+      if (matchedSummary || edgeSrc instanceof InstanceinvokeSource || edgeSrc instanceof StaticinvokeSource
+          || isExpectedType) {
         for (VirtualEdgeTarget edgeTgt : ve.getTargets()) {
           if (edgeTgt instanceof InvocationVirtualEdgeTarget) {
             InvocationVirtualEdgeTarget ieEdgeTgt = (InvocationVirtualEdgeTarget) edgeTgt;
+            // A local summary has one target; dispatch already selected e.tgt(), including covariant return types.
             for (Local local : getOnFlyCallGraph().ofcgb().getReceiversOfVirtualEdge(ieEdgeTgt, ie)) {
               Node parm = srcmpag.nodeFactory().getNode(local);
               parm = srcmpag.parameterize(parm, e.srcCtxt());
               parm = parm.getReplacement();
+              if (matchedSummary) {
+                parm = constrainCallSiteReceiver(e, srcmpag, parm, ieEdgeTgt.getTargetType());
+              }
 
               // Get the PAG node for the "this" local in the callback
               Node thiz = tgtmpag.nodeFactory().caseThis();
@@ -1134,11 +1157,49 @@ public class PAG implements PointsToAnalysis {
               // Make an edge from caller.argument to callee.this
               addEdge(parm, thiz);
               pval = addInterproceduralAssignment(parm, thiz, e);
+              if (matchedSummary && callSiteModelCalls != null) {
+                RefType declaringType = ieEdgeTgt.getTargetType();
+                if (declaringType == null) {
+                  // VirtualCalls resolves array receivers against Object as well.
+                  declaringType = local.getType() instanceof ArrayType ? Scene.v().getObjectType()
+                      : (RefType) local.getType();
+                }
+                SootMethod declaration = Scene.v()
+                    .makeMethodRef(declaringType.getSootClass(), ieEdgeTgt.getTargetMethod(), false).resolve();
+                CallSiteModelCall modelCall = callSiteModelCalls.get(e.srcStmt());
+                if (modelCall == null) {
+                  modelCall = new CallSiteModelCall(e.srcStmt(), e.src(), declaration, parm);
+                  callSiteModelCalls.put(e.srcStmt(), modelCall);
+                }
+                modelCall.assignments.add(pval);
+              }
 
               // We need to ensure that the target method exists, at least as a phantom
               if (local.getType() instanceof RefType) {
                 RefType rtTarget = (RefType) local.getType();
                 Scene.v().makeMethodRef(rtTarget.getSootClass(), ieEdgeTgt.getTargetMethod(), false).resolve();
+              }
+            }
+            if (matchedSummary && ieEdgeTgt instanceof DirectTarget) {
+              for (AbstractParameterMapping mapping : ((DirectTarget) ieEdgeTgt).getParameterMappings()) {
+                // VirtualEdgeSummaryTag guarantees direct mappings.
+                DirectParameterMapping direct = (DirectParameterMapping) mapping;
+                Value value = direct.getMappedSourceArgumentArg(ie);
+                if (!(value.getType() instanceof RefLikeType)) {
+                  continue;
+                }
+                Node from = srcmpag.nodeFactory().getNode(value);
+                Node to = direct.getTargetIndex() == -1 ? tgtmpag.nodeFactory().caseThis()
+                    : tgtmpag.nodeFactory().caseParm(direct.getTargetIndex());
+                if (from != null && to != null) {
+                  from = srcmpag.parameterize(from, e.srcCtxt()).getReplacement();
+                  to = tgtmpag.parameterize(to, e.tgtCtxt()).getReplacement();
+                  addEdge(from, to);
+                  Pair<Node, Node> assignment = addInterproceduralAssignment(from, to, e);
+                  if (callSiteModelCalls != null) {
+                    callSiteModelCalls.get(e.srcStmt()).assignments.add(assignment);
+                  }
+                }
               }
             }
           } else if (edgeTgt instanceof DeferredVirtualEdgeTarget && e.srcStmt() instanceof AssignStmt
@@ -1620,6 +1681,50 @@ public class PAG implements PointsToAnalysis {
   }
 
   public NativeMethodDriver nativeMethodDriver;
+
+  // Only local summaries need separate identities; legacy global summaries retain their existing behavior.
+  private Map<Stmt, CallSiteModelCall> callSiteModelCalls;
+
+  public Collection<CallSiteModelCall> getCallSiteModelCalls() {
+    return callSiteModelCalls == null ? Collections.emptyList()
+        : Collections.unmodifiableCollection(callSiteModelCalls.values());
+  }
+
+  /** One logical summary invocation, independently of the original API and its resolved implementations. */
+  public static final class CallSiteModelCall {
+    private final Stmt statement;
+    private final SootMethod invokingMethod;
+    private final SootMethod invokedMethod;
+    private final Node receiver;
+    private final Set<Pair<Node, Node>> assignments = new LinkedHashSet<>();
+
+    private CallSiteModelCall(Stmt statement, SootMethod invokingMethod, SootMethod invokedMethod, Node receiver) {
+      this.statement = statement;
+      this.invokingMethod = invokingMethod;
+      this.invokedMethod = invokedMethod;
+      this.receiver = receiver;
+    }
+
+    public Stmt getStatement() {
+      return statement;
+    }
+
+    public SootMethod getInvokingMethod() {
+      return invokingMethod;
+    }
+
+    public SootMethod getInvokedMethod() {
+      return invokedMethod;
+    }
+
+    public Node getReceiver() {
+      return receiver;
+    }
+
+    public Set<Pair<Node, Node>> getAssignments() {
+      return Collections.unmodifiableSet(assignments);
+    }
+  }
 
   public HashMultiMap<InvokeExpr, Pair<Node, Node>> callAssigns;
   public Map<InvokeExpr, SootMethod> callToMethod;

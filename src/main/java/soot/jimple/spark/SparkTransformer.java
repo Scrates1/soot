@@ -77,6 +77,10 @@ import soot.tagkit.Tag;
 public class SparkTransformer extends SceneTransformer {
   private static final Logger logger = LoggerFactory.getLogger(SparkTransformer.class);
 
+  /** Constructor for client subclasses registered as custom SPARK phases. */
+  protected SparkTransformer() {
+  }
+
   public SparkTransformer(Singletons.Global g) {
   }
 
@@ -84,12 +88,17 @@ public class SparkTransformer extends SceneTransformer {
     return G.v().soot_jimple_spark_SparkTransformer();
   }
 
+  /** Creates the builder for this analysis. Override to customize construction while retaining the SPARK pipeline. */
+  protected ContextInsensitiveBuilder createContextInsensitiveBuilder() {
+    return new ContextInsensitiveBuilder();
+  }
+
   protected void internalTransform(String phaseName, Map<String, String> options) {
     SparkOptions opts = new SparkOptions(options);
     final String output_dir = SourceLocator.v().getOutputDir();
 
     // Build pointer assignment graph
-    ContextInsensitiveBuilder b = new ContextInsensitiveBuilder();
+    ContextInsensitiveBuilder b = createContextInsensitiveBuilder();
     if (opts.pre_jimplify()) {
       b.preJimplify();
     }
