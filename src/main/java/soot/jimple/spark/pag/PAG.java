@@ -1182,9 +1182,7 @@ public class PAG implements PointsToAnalysis {
             }
             if (matchedSummary && ieEdgeTgt instanceof DirectTarget) {
               for (AbstractParameterMapping mapping : ((DirectTarget) ieEdgeTgt).getParameterMappings()) {
-                if (!(mapping instanceof DirectParameterMapping)) {
-                  throw new IllegalArgumentException("Call-site summaries require direct parameter mappings");
-                }
+                // VirtualEdgeSummaryTag guarantees direct mappings.
                 DirectParameterMapping direct = (DirectParameterMapping) mapping;
                 Value value = direct.getMappedSourceArgumentArg(ie);
                 if (!(value.getType() instanceof RefLikeType)) {

@@ -900,10 +900,8 @@ public class OnFlyCallGraphBuilder {
           if (!(value instanceof Local) && !(value instanceof NullConstant)) {
             throw new IllegalArgumentException("Call-site summary receivers require a Local or null constant");
           }
+          // VirtualEdgeSummaryTag only accepts direct mappings; the remaining checks need the statement.
           for (AbstractParameterMapping mapping : localTarget.getParameterMappings()) {
-            if (!(mapping instanceof DirectParameterMapping)) {
-              throw new IllegalArgumentException("Call-site summaries require direct parameter mappings");
-            }
             int sourceIndex = ((DirectParameterMapping) mapping).getSourceIndex();
             if (sourceIndex == -1) {
               if (!(ie instanceof InstanceInvokeExpr)) {
