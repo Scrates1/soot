@@ -96,7 +96,9 @@ import soot.jimple.VirtualInvokeExpr;
 import soot.jimple.spark.pag.AllocDotField;
 import soot.jimple.toolkits.annotation.nullcheck.NullnessAnalysis;
 import soot.jimple.toolkits.callgraph.ConstantArrayAnalysis.ArrayTypes;
+import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.AbstractParameterMapping;
 import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.DeferredVirtualEdgeTarget;
+import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.DirectParameterMapping;
 import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.DirectTarget;
 import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.IndirectTarget;
 import soot.jimple.toolkits.callgraph.VirtualEdgesSummaries.InvocationVirtualEdgeTarget;
@@ -648,6 +650,14 @@ public class OnFlyCallGraphBuilder {
         } else {
           SootMethodRef ref = null;
           Type receiverType = receiver.getType();
+          DirectTarget localTarget = site.kind() == Kind.GENERIC_FAKE ? getLocalSummaryTarget(site.getStmt()) : null;
+          if (localTarget != null) {
+            if (localTarget.getTargetType() != null) {
+              receiverType = localTarget.getTargetType();
+            } else if (receiverType instanceof ArrayType) {
+              receiverType = sc.getObjectType();
+            }
+          }
 
           // Fake edges map to a different method signature, e.g., from execute(a) to a.run()
           if (receiverType instanceof RefType) {
@@ -661,7 +671,12 @@ public class OnFlyCallGraphBuilder {
           }
 
           if (ref != null) {
-            virtualCalls.resolve(type, receiver.getType(), ref, site.getContainer(), targetsQueue, appOnly);
+            if (localTarget == null) {
+              virtualCalls.resolve(type, receiverType, ref, site.getContainer(), targetsQueue, appOnly);
+            } else {
+              virtualCalls.resolve(type, receiver.getType(), localTarget.getTargetType(), ref, site.getContainer(),
+                  targetsQueue, appOnly);
+            }
             if (!targets.hasNext() && options.resolve_all_abstract_invokes()) {
               /*
                * In the situation where we find nothing to resolve an invoke to in the first call, this might be because the
@@ -677,7 +692,8 @@ public class OnFlyCallGraphBuilder {
                * Where as, it used to not resolve any targets in this situation, I want to at least resolve the method in the
                * parent class if there is one (as this is technically a possibility and the only information we have).
                */
-              virtualCalls.resolveSuperType(type, receiver.getType(), iie.getMethodRef(), targetsQueue, appOnly);
+              SootMethodRef superRef = localTarget == null ? iie.getMethodRef() : ref;
+              virtualCalls.resolveSuperType(type, receiverType, superRef, targetsQueue, appOnly);
             }
           }
         }
@@ -866,14 +882,42 @@ public class OnFlyCallGraphBuilder {
       }
       if (s.containsInvokeExpr()) {
         InvokeExpr ie = s.getInvokeExpr();
+        DirectTarget localTarget = getLocalSummaryTarget(s);
+        if (localTarget != null) {
+          Value value;
+          if (localTarget.isBase()) {
+            if (!(ie instanceof InstanceInvokeExpr)) {
+              throw new IllegalArgumentException("Call-site summary base receiver requires an instance invocation: " + s);
+            }
+            value = ((InstanceInvokeExpr) ie).getBase();
+          } else {
+            int receiverIndex = localTarget.getArgIndex();
+            if (receiverIndex < 0 || receiverIndex >= ie.getArgCount()) {
+              throw new IllegalArgumentException("Call-site summary receiver argument index is out of range: " + s);
+            }
+            value = ie.getArg(receiverIndex);
+          }
+          if (!(value instanceof Local) && !(value instanceof NullConstant)) {
+            throw new IllegalArgumentException("Call-site summary receivers require a Local or null constant");
+          }
+          // VirtualEdgeSummaryTag only accepts direct mappings; the remaining checks need the statement.
+          for (AbstractParameterMapping mapping : localTarget.getParameterMappings()) {
+            int sourceIndex = ((DirectParameterMapping) mapping).getSourceIndex();
+            if (sourceIndex == -1) {
+              if (!(ie instanceof InstanceInvokeExpr)) {
+                throw new IllegalArgumentException("Call-site summary base mappings require an instance invocation: " + s);
+              }
+            } else if (sourceIndex < 0 || sourceIndex >= ie.getArgCount()) {
+              throw new IllegalArgumentException("Call-site summary source argument index is out of range: " + s);
+            }
+          }
+        }
         if (ie instanceof InstanceInvokeExpr) {
           InstanceInvokeExpr iie = (InstanceInvokeExpr) ie;
 
           Local receiver = (Local) iie.getBase();
-          if (!(iie instanceof SpecialInvokeExpr)) {
-            MethodSubSignature subSig = new MethodSubSignature(iie.getMethodRef());
-
-            VirtualEdge virtualEdge = virtualEdgeSummaries.getVirtualEdgesMatchingSubSig(subSig);
+          if (!(iie instanceof SpecialInvokeExpr) || s.hasTag(VirtualEdgeSummaryTag.NAME)) {
+            VirtualEdge virtualEdge = virtualEdgeSummaries.getVirtualEdgesMatchingCallSite(s);
             if (virtualEdge != null) {
               for (VirtualEdgeTarget t : virtualEdge.targets) {
                 if (t instanceof InvocationVirtualEdgeTarget) {
@@ -883,7 +927,8 @@ public class OnFlyCallGraphBuilder {
                 }
               }
             }
-          } else {
+          }
+          if (iie instanceof SpecialInvokeExpr) {
             addEdge(m, s, ie.getMethod(), Kind.SPECIAL);
           }
 
@@ -898,7 +943,10 @@ public class OnFlyCallGraphBuilder {
           if (tgt != null) {
             addEdge(m, s, tgt);
             String signature = tgt.getSignature();
-            VirtualEdge virtualEdge = virtualEdgeSummaries.getVirtualEdgesMatchingFunction(signature);
+            // Preserve resolved-target lookup for untagged static calls.
+            VirtualEdge virtualEdge = s.hasTag(VirtualEdgeSummaryTag.NAME)
+                ? virtualEdgeSummaries.getVirtualEdgesMatchingCallSite(s)
+                : virtualEdgeSummaries.getVirtualEdgesMatchingFunction(signature);
             if (virtualEdge != null) {
               for (VirtualEdgeTarget t : virtualEdge.targets) {
                 if (t instanceof DirectTarget) {
@@ -921,6 +969,12 @@ public class OnFlyCallGraphBuilder {
         }
       }
     }
+  }
+
+  private static DirectTarget getLocalSummaryTarget(Stmt statement) {
+    VirtualEdgeSummaryTag tag = (VirtualEdgeSummaryTag) statement.getTag(VirtualEdgeSummaryTag.NAME);
+    VirtualEdge summary = tag == null ? null : tag.getSummary();
+    return summary == null ? null : (DirectTarget) summary.getTargets().iterator().next();
   }
 
   protected void processVirtualEdgeSummary(SootMethod m, final Stmt s, Local receiver, InvocationVirtualEdgeTarget target,
