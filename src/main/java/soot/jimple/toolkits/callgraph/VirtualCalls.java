@@ -161,8 +161,15 @@ public class VirtualCalls {
       if (options.library() == CGOptions.library_signature_resolution && base.getSootClass().isInterface()) {
         LOGGER.warn("Deprecated library dispatch is conducted. The results might be unsound...");
         resolveLibrarySignature(declaredType, sigType, callee, container, targets, appOnly, base);
+      } else if (sigType instanceof RefType) {
+        // The unknown receiver is bounded by both the base and the signature type. An implementation inherited from
+        // a class outside sigType still applies to receivers inside it.
+        SootClass bound = ((RefType) sigType).getSootClass();
+        for (SootMethod dispatch : fastHierachy.resolveAbstractDispatch(base.getSootClass(), bound, callee)) {
+          targets.add(dispatch);
+        }
       } else {
-        for (SootMethod dispatch : Scene.v().getOrMakeFastHierarchy().resolveAbstractDispatch(base.getSootClass(), callee)) {
+        for (SootMethod dispatch : fastHierachy.resolveAbstractDispatch(base.getSootClass(), callee)) {
           targets.add(dispatch);
         }
       }
