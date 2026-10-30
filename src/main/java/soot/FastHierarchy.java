@@ -698,7 +698,35 @@ public class FastHierarchy {
     return methodRefToAbstractMethods.computeIfAbsent(pair, abstractMethodComputation);
   }
 
+  /**
+   * Given an object whose runtime type is an unknown subtype of both baseType and boundType, returns the methods which could
+   * be called on an o.f() invocation. The receiver class, not the class declaring the resolved method, has to satisfy both
+   * bounds: an implementation inherited from outside boundType is kept when a receiver inside boundType inherits it.
+   *
+   * @param baseType
+   *          The declared type C of the object
+   * @param boundType
+   *          A second type the object is known to be compatible with
+   */
+  public Set<SootMethod> resolveAbstractDispatch(SootClass baseType, SootClass boundType, SootMethodRef m) {
+    if (canStoreClass(baseType, boundType)) {
+      return resolveAbstractDispatch(baseType, m);
+    }
+    if (canStoreClass(boundType, baseType)) {
+      return resolveAbstractDispatch(boundType, m);
+    }
+    return doResolveAbstractDispatch(baseType, boundType, m);
+  }
+
   protected Set<SootMethod> doResolveAbstractDispatch(SootClass baseType, SootMethodRef m) {
+    return doResolveAbstractDispatch(baseType, null, m);
+  }
+
+  /**
+   * Resolves o.f() for every possible receiver class below baseType. If boundType is non-null, only receiver classes that
+   * can be stored in boundType are resolved; their subclasses are still traversed.
+   */
+  protected Set<SootMethod> doResolveAbstractDispatch(SootClass baseType, SootClass boundType, SootMethodRef m) {
     HashSet<SootClass> resolved = new HashSet<>();
     HashSet<SootMethod> ret = new HashSet<>();
 
@@ -739,7 +767,7 @@ public class FastHierarchy {
         }
       }
 
-      if (!resolved.contains(concreteType)) {
+      if (!resolved.contains(concreteType) && (boundType == null || canStoreClass(concreteType, boundType))) {
         SootMethod resolvedMethod = resolveMethod(concreteType, m.getDeclaringClass(), m.getName(), m.getParameterTypes(),
             m.getReturnType(), false, false, resolved, m.getSubSignature());
         if (resolvedMethod != null) {
