@@ -414,13 +414,25 @@ public class SootUtil {
       return Collections.singleton(invokedMethod);
     }
     Type receiverType = invokedMethod.getDeclaringClass().getType();
-    ChunkedQueue chunkedQueue = new ChunkedQueue();
-    Iterator iter = chunkedQueue.reader();
-    VirtualCalls.v().resolve(type, receiverType, invokedMethod.makeRef(), null, chunkedQueue);
+    return resolveTargets(type, receiverType, null, invokedMethod);
+  }
+
+  /**
+   * Resolves the targets of invokedMethod for a receiver of runtime type type that is statically known to be compatible with
+   * receiverType. Unlike {@link #getCallTargets(Type, SootMethod)}, receiverType also bounds the dispatch of unknown
+   * (AnySubType) receivers.
+   */
+  public static Set<SootMethod> getCallTargets(Type type, Type receiverType, SootMethod invokedMethod) {
+    return resolveTargets(type, receiverType, receiverType, invokedMethod);
+  }
+
+  private static Set<SootMethod> resolveTargets(Type type, Type declaredType, Type sigType, SootMethod invokedMethod) {
+    ChunkedQueue<SootMethod> chunkedQueue = new ChunkedQueue<>();
+    Iterator<SootMethod> iter = chunkedQueue.reader();
+    VirtualCalls.v().resolve(type, declaredType, sigType, invokedMethod.makeRef(), null, chunkedQueue);
     Set<SootMethod> ret = new ArraySet<SootMethod>();
-    for (; iter.hasNext();) {
-      SootMethod target = (SootMethod) iter.next();
-      ret.add(target);
+    while (iter.hasNext()) {
+      ret.add(iter.next());
     }
     return ret;
   }

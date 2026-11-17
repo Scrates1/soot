@@ -1147,14 +1147,9 @@ public final class DemandCSPointsTo implements PointsToAnalysis {
       return Collections.<SootMethod>emptySet();
     }
     if (type instanceof AnySubType) {
-      AnySubType any = (AnySubType) type;
-      RefType refType = any.getBase();
-      if (pag.getTypeManager().getFastHierarchy().canStoreType(receiverType, refType)
-          || pag.getTypeManager().getFastHierarchy().canStoreType(refType, receiverType)) {
-        return possibleTargets;
-      } else {
-        return Collections.<SootMethod>emptySet();
-      }
+      Set<SootMethod> result = SootUtil.getCallTargets(type, receiverType, callee);
+      result.retainAll(possibleTargets);
+      return result;
     }
     if (type instanceof ArrayType) {
       // we'll invoke the java.lang.Object method in this
@@ -1742,7 +1737,11 @@ public final class DemandCSPointsTo implements PointsToAnalysis {
       @Override
       public void handleAlloc(AllocNode allocNode, VarAndContext origVarAndContext) {
         if (doPointsTo && pointsTo != null) {
-          pointsTo.add(new AllocAndContext(allocNode, origVarAndContext.context));
+          // Backward traversal can cross a narrowing assignment. Refinement must
+          // preserve the solved PAG upper bound while retaining allocation contexts.
+          if (varAndContext.var.getP2Set().contains(allocNode)) {
+            pointsTo.add(new AllocAndContext(allocNode, origVarAndContext.context));
+          }
         } else {
           if (badLocs.contains(allocNode)) {
             success = false;

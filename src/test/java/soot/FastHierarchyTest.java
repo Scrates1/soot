@@ -228,6 +228,88 @@ public class FastHierarchyTest {
     assertTrue(fh.canStoreType(AnySubType.v(abstractBase.getType()), otherContract.getType()));
   }
 
+  @Test
+  public void testBoundedAbstractDispatchKeepsReceiversSatisfyingBothBounds() {
+    G.reset();
+    Scene s = Scene.v();
+    s.loadNecessaryClasses();
+
+    SootClass contract = generacteSceneClass("Contract", Modifier.INTERFACE);
+    SootMethodRef run = addRun(contract, Modifier.PUBLIC | Modifier.ABSTRACT).makeRef();
+    SootClass otherContract = generacteSceneClass("OtherContract", Modifier.INTERFACE);
+    addRun(otherContract, Modifier.PUBLIC | Modifier.ABSTRACT);
+
+    SootClass both = generacteSceneClass("Both", 0);
+    both.addInterface(contract);
+    both.addInterface(otherContract);
+    SootMethod bothRun = addRun(both, Modifier.PUBLIC);
+    SootClass contractOnly = generacteSceneClass("ContractOnly", 0);
+    contractOnly.addInterface(contract);
+    addRun(contractOnly, Modifier.PUBLIC);
+    SootClass otherOnly = generacteSceneClass("OtherOnly", 0);
+    otherOnly.addInterface(otherContract);
+    addRun(otherOnly, Modifier.PUBLIC);
+
+    FastHierarchy fh = s.getOrMakeFastHierarchy();
+
+    assertEquals(Collections.singleton(bothRun), fh.resolveAbstractDispatch(contract, otherContract, run));
+  }
+
+  @Test
+  public void testBoundedAbstractDispatchRetainsImplementationInheritedFromAbstractBase() {
+    G.reset();
+    Scene s = Scene.v();
+    s.loadNecessaryClasses();
+
+    SootClass contract = generacteSceneClass("Contract", Modifier.INTERFACE);
+    SootMethodRef run = addRun(contract, Modifier.PUBLIC | Modifier.ABSTRACT).makeRef();
+    SootClass abstractBase = generacteSceneClass("AbstractBase", Modifier.ABSTRACT);
+    abstractBase.addInterface(contract);
+    SootMethod inherited = addRun(abstractBase, Modifier.PUBLIC);
+    SootClass sibling = generacteSceneClass("Sibling", 0);
+    sibling.addInterface(contract);
+    addRun(sibling, Modifier.PUBLIC);
+
+    FastHierarchy fh = s.getOrMakeFastHierarchy();
+
+    // An unknown concrete extension of AbstractBase inherits its implementation
+    assertEquals(Collections.singleton(inherited), fh.resolveAbstractDispatch(contract, abstractBase, run));
+    assertEquals(Collections.singleton(inherited), fh.resolveAbstractDispatch(abstractBase, contract, run));
+  }
+
+  @Test
+  public void testBoundedAbstractDispatchUsesReceiverClassRatherThanMethodOwner() {
+    G.reset();
+    Scene s = Scene.v();
+    s.loadNecessaryClasses();
+
+    SootClass contract = generacteSceneClass("Contract", Modifier.INTERFACE);
+    SootMethodRef run = addRun(contract, Modifier.PUBLIC | Modifier.ABSTRACT).makeRef();
+    SootClass otherContract = generacteSceneClass("OtherContract", Modifier.INTERFACE);
+    addRun(otherContract, Modifier.PUBLIC | Modifier.ABSTRACT);
+
+    SootClass parent = generacteSceneClass("Parent", 0);
+    parent.addInterface(contract);
+    SootMethod parentRun = addRun(parent, Modifier.PUBLIC);
+    SootClass selected = generacteSceneClass("Selected", 0);
+    selected.setSuperclass(parent);
+    selected.addInterface(otherContract);
+    SootClass unselected = generacteSceneClass("Unselected", 0);
+    unselected.setSuperclass(parent);
+
+    FastHierarchy fh = s.getOrMakeFastHierarchy();
+
+    // Selected inherits run() from Parent, which does not implement OtherContract itself
+    assertEquals(Collections.singleton(parentRun), fh.resolveAbstractDispatch(contract, otherContract, run));
+    assertEquals(Collections.emptySet(), fh.resolveAbstractDispatch(unselected, otherContract, run));
+  }
+
+  private static SootMethod addRun(SootClass owner, int modifiers) {
+    SootMethod run = new SootMethod("run", Collections.emptyList(), VoidType.v(), modifiers);
+    owner.addMethod(run);
+    return run;
+  }
+
   private static class FastHierarchyForUnittest extends FastHierarchy {
 
     @Override
